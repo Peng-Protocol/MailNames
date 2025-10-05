@@ -1,11 +1,11 @@
 # MailNames
-**Version**: 0.0.6
+**Version**: 0.0.7
 **Date**: 05/10/2025  
 **SPDX-License-Identifier**: BSL 1.1 - Peng Protocol 2025  
 **Solidity Version**: ^0.8.2  
 
 ## Overview
-`MailNames` is a decentralized domain name system inspired by ENS with ERC721 compatibility, enabling free name minting (indexed by tokenId from 0 upward) with a 1-year allowance and 30-day grace period for queued check-ins via MailLocker token locks (exponential min deposit, 10y lock, dynamic wait 10min-2w). Post-grace, highest ETH bid or oldest ERC20 bid claims via auto-settlement. Supports subnames (implicitly transferred with parents) with custom records (strings <=1024 chars), controlled by parent owners. Bidding in ETH/ERC20 with fee-on-transfer handling. Names limited to 24 chars. Primary for Chainmail (link unavailable). Ownership unified under ERC721 `ownerOf`; transferred names inherit allowance. Safe transfers enforce ERC721Receiver hooks for contract recipients.
+`MailNames` is a decentralized domain name system inspired by ENS with ERC721 compatibility, enabling free name minting (indexed by tokenId from 0 upward) with a 1-year allowance and 30-day grace period for bids to auto-settle post-expiration. Owners can queue check-ins anytime after expiration (locks min token in MailLocker for 10y; dynamic wait 10min-2w). Highest ETH bid or oldest ERC20 bid auto-claims post-grace. Supports subnames (implicitly transferred with parents) with custom records (strings <=1024 chars), controlled by parent owners. Bidding in ETH/ERC20 with fee-on-transfer handling. Names limited to 24 chars. Primary for Chainmail (link unavailable). Ownership unified under ERC721 `ownerOf`; transferred names inherit allowance. Safe transfers enforce ERC721Receiver hooks for contract recipients.
 
 ## Structs
 - **NameRecord**: Stores domain details.
@@ -72,17 +72,17 @@
 - **Effects**: Initializes NameRecord (incl. tokenId/allowanceEnd), maps tokenIdToNameHash/nameHashToTokenId/ownerOf/_balances (increment), pushes to allNameHashes, emits NameMinted/Transfer(address(0), msg.sender, tokenId).
 
 ### queueCheckIn(uint256 _nameHash)
-- **Purpose**: Queues checkin during grace (locks min token in MailLocker for 10y; dynamic min/wait based on current queue len).
-- **Params/Interactions**: _nameHash to tokenId; transfers min wei from caller to MailNames, then full to MailLocker via depositLock (normalized amt, user, unlock=now+10y); assumes 18dec—adjust if not.
-- **Checks**: Caller=owner (ownerOf[tokenId]), in grace (post-allowanceEnd, pre+grace); transfer succeeds.
+- **Purpose**: Queues checkin anytime post-expiration (locks min token in MailLocker for 10y; dynamic min/wait based on current queue len; enables late renewals despite bid risk).
+- **Params/Interactions**: _nameHash to tokenId; transfers min wei from caller to MailNames, then full to MailLocker via depositLock (normalized amt, user, unlock=now+10y); assumes 18dec—adjust if not; race: bids can auto-settle concurrently if post-grace.
+- **Checks**: Caller=owner (ownerOf[tokenId]), expired (post-allowanceEnd); transfer succeeds. No grace upper—allows post-grace to counter bids.
 - **Internal Calls**:
-  - `_calculateMinRequired`: 1 * 2^queueLen (wei; escalates spam cost exponentially).
-  - `_calculateWaitDuration`: 10min + 6h*queueLen, cap 2w (adds uncertainty for auctions).
-  - `IERC20.transferFrom`: Pulls min from user to MailNames.
-  - `MailLocker.depositLock`: Locks normalized (min/10^decimals) for user/10y (overrides prior timers).
+  - `_calculateMinRequired`: 1 * 2^queueLen (wei; escalates spam cost exponentially, fixed at queue).
+  - `_calculateWaitDuration`: 10min + 6h*queueLen, cap 2w (adds uncertainty, fixed at queue).
+  - `IERC20.transferFrom`: Pulls min from user to MailNames (pre-approval needed).
+  - `MailLocker.depositLock`: Locks normalized (min/10^decimals) for user/10y (appends to user's deposits array).
   - Pushes PendingCheckin (hash, user, now, wait).
-  - `this.advance`: Attempts process (skips if time not met).
-- **Effects**: Emits QueueCheckInQueued (hash, user, minWei, wait); queue grows, min/wait rise for next—deters hording via capital lockup.
+  - `this.advance`: Attempts process (skips if time/user not ready; external call for view-like safety).
+- **Effects**: Emits QueueCheckInQueued (hash, user, minWei, wait); queue grows, min/wait rise for next—deters hording via capital lockup; processed checkin extends allowance, but bids check grace separately for auto-claim.
 
 ### advance()
 - **Purpose**: Processes one ready checkin (external, gas-safe; callable anytime for decentralization).
@@ -90,27 +90,27 @@
 - **Checks**: nextProcessIndex < len && time >= queued+wait; still owner (ownerOf[tokenId]==user).
 - **Internal Calls**:
   - `_processNextCheckin`: Updates allowanceEnd=+ALLOWANCE_PERIOD if ready/eligible; emits NameCheckedIn/CheckInProcessed; ++index (depopulates queue).
-- **Effects**: Advances queue; no revert on skip (graceful—retry later); invoked post-queue for immediate attempt.
+- **Effects**: Advances queue; no revert on skip (graceful—retry later); invoked post-queue for immediate attempt; post-process, name safe from bids until next expiration.
 
 ### placeTokenBid(string _name, uint256 _amount, address _token)
-- **Purpose**: Places ERC20 bid; auto-settles best if post-grace.
+- **Purpose**: Places ERC20 bid; auto-settles best if post-grace (independent of queue—race with late checkins).
 - **Params/Interactions**: _amount in token units; pre/post balance calc handles fees (receivedAmount = (after - before)/decimals); updates bidderNameHashes if new name.
 - **Checks**: Name exists (tokenId!=0), _amount>0, transfer succeeds, received>0.
 - **Internal Calls**:
   - `_stringToHash`: nameHash for bids/retrieval.
   - `_findBestBid`: Scans bids[] for highest ETH/oldest ERC20 (returns index/found; invoked post-grace for auto-select).
   - `_settleBid` (if expired): Triggers on bestIndex; transfers funds to old owner, calls _transfer (updates ownerOf/_balances, emits Transfer), emits BidSettled.
-- **Effects**: Stores Bid in bids/bidderBids (with index), emits BidPlaced; settlement via _transfer ensures ERC721 sync without allowance reset.
+- **Effects**: Stores Bid in bids/bidderBids (with index), emits BidPlaced; settlement via _transfer ensures ERC721 sync without allowance reset; checks block.timestamp > allowanceEnd + GRACE_PERIOD for auto.
 
 ### placeETHBid(string _name)
-- **Purpose**: Places ETH bid; auto-settles best if post-grace (similar to token bid).
+- **Purpose**: Places ETH bid; auto-settles best if post-grace (similar to token bid; race with queues).
 - **Params/Interactions**: msg.value as amount; updates bidderNameHashes if new.
 - **Checks**: Name exists, msg.value>0.
 - **Internal Calls**:
   - `_stringToHash`: nameHash.
   - `_findBestBid`: Selects best.
   - `_settleBid` (if expired): Transfers ETH to old owner, calls _transfer (updates ownerOf/_balances, emits Transfer), emits BidSettled.
-- **Effects**: Stores Bid (isETH=true), emits BidPlaced; ERC721 sync on settle.
+- **Effects**: Stores Bid (isETH=true), emits BidPlaced; ERC721 sync on settle; grace check independent of queue status.
 
 ### closeBid(uint256 _nameHash, uint256 _bidIndex)
 - **Purpose**: Refunds/removes bidder's bid (swap-and-pop for gas); cleans bidderNameHashes if last bid.
@@ -119,9 +119,9 @@
 - **Effects**: Transfers refund (ETH or token*decimals), removes from bids/bidderBids, emits BidClosed (no ERC721 impact).
 
 ### acceptBid(uint256 _nameHash, uint256 _bidIndex)
-- **Purpose**: Manual settle during allowance (owner choice).
+- **Purpose**: Manual settle during allowance (owner choice; pre-expiration only).
 - **Params/Interactions**: _bidIndex specifies bid; bypasses best-bid logic.
-- **Checks**: Caller=owner (ownerOf[tokenId]), within allowance.
+- **Checks**: Caller=owner (ownerOf[tokenId]), within allowance (pre-expiration).
 - **Internal Calls**:
   - `_settleBid`: Transfers to old owner, calls _transfer (updates ownerOf/_balances, emits Transfer), emits BidSettled.
 - **Effects**: Ownership transfer with ERC721 compliance, no allowance reset.
@@ -261,24 +261,25 @@
 - **_isContract(address _account)**: Assembly extcodesize>0 check; supports _checkOnERC721Received by identifying contract recipients needing hooks, avoiding unnecessary calls to EOAs.
 - **_calculateMinRequired(uint256 _queueLen)**: 1 * 2^_queueLen (wei; fixed per queue, exponential anti-spam).
 - **_calculateWaitDuration(uint256 _queueLen)**: 10min + 6h*_queueLen, min(2w) (fixed per queue, adds auction tension).
-- **_processNextCheckin()**: If ready (time/user check), updates allowanceEnd, emits; ++nextProcessIndex (O(1), depopulates via index).
+- **_processNextCheckin()**: If ready (time/user check), updates allowanceEnd, emits; ++nextProcessIndex (O(1), depopulates via index); called by advance for queue progress.
 
 ## Key Insights
 - **ERC721 Integration**: tokenId enables standard transfers/approvals; _balances O(1) counter avoids loops; nameHashToTokenId speeds owner checks. Subnames bundle with parents—no separate tokens, reducing complexity/gas. SafeTransferFrom now atomic with hooks via _checkOnERC721Received/_isContract, preventing stuck transfers to non-compliant contracts.
-- **Queue Mechanics**: queueCheckIn locks via MailLocker (deposit flows through MailNames; multi-deposits indexed); advance processes one O(1)—decentralized, no DoS (anyone calls); transfers don't cancel pending (validates user on process); min/wait fixed at queue (fluctuates for new based on len, not retroactive).
-- **Settlement Dual-Use**: _settleBid handles manual (acceptBid, during allowance) vs. auto (place*Bid post-grace via _findBestBid); routes through _transfer for uniform ERC721 events/fund xfers, inherits allowance to enforce queue mechanics.
+- **Queue Mechanics**: queueCheckIn locks via MailLocker (deposit flows through MailNames; multi-deposits indexed); advance processes one O(1)—decentralized, no DoS (anyone calls); transfers don't cancel pending (validates user on process); min/wait fixed at queue (fluctuates for new based on len, not retroactive); post-grace queues race with bids for renewal tension.
+- **Settlement Dual-Use**: _settleBid handles manual (acceptBid, during allowance) vs. auto (place*Bid post-grace via _findBestBid); routes through _transfer for uniform ERC721 events/fund xfers, inherits allowance to enforce queue mechanics; grace check in place*Bid ignores queues—first-come wins.
 - **Fee Handling**: placeTokenBid computes receivedAmount via balance delta/decimals, storing accurate bid.amount for refunds/settles—robust for tax tokens.
 - **DoS/Gas Mitigations**: Swap-and-pop in closeBid; paginated views (step/maxIterations) for arrays; allNameHashes/bidderNameHashes enable efficient enumeration without hash scans; no fixed loops; _isContract assembly for cheap contract detection; queue advance O(1).
 - **Ownership Sync**: Single source via ownerOf[tokenId]; all functions resolve via nameHashToTokenId for quick auth, transfers via _transfer prevent inconsistencies.
 - **String Limits**: Enforced at mint/set (24/1024 chars) to cap gas; keccak256 on short names cheap.
 - **Bid Granularity**: bidderBids indices + bidderNameHashes enable O(1) retrieval in getBidderNameBids/getBidderBids without full scans; auto-clean on closeBid.
-- **Grace/Queue-Settle**: Prevents premature claims; _findBestBid prioritizes ETH value > ERC20 age for auction fairness; no renewal on transfer/settle avoids spam; queue adds 10y lock cost for commitment.
+- **Grace/Queue-Settle**: Prevents premature claims; _findBestBid prioritizes ETH value > ERC20 age for auction fairness; no renewal on transfer/settle avoids spam; queue adds 10y lock cost for commitment; late queues counter bids but risk race loss.
 - **Events**: Standard ERC721 (Transfer/Approval/ApprovalForAll) + custom for bids/records/queue; no emits in views.
 - **Degradation**: Reverts only on critical (e.g., invalid auth/transfer fail); descriptive strings; safeTransferFrom uses try/catch for hook failures without broader impact; advance skips gracefully.
 
 ## Notes
 - No ReentrancyGuard needed (no recursive calls); transfers post-state updates.
 - All on-chain; graceful via checks, try/catch in hooks.
+- Removed old checkIn; deploy MailLocker first, then setMailLocker/setMailToken.
 - Ownership: transferOwnership for handoff; MailLocker mirrors.
 
 ## MailLocker
@@ -304,7 +305,7 @@ Separate locker for MailToken (ERC20) deposits from MailNames queues (10y unlock
 - **Purpose**: Locks new deposit (pulls full from MailNames).
 - **Params/Interactions**: Normalized amt (MailNames sends full=amt*10^dec); pushes to userDeposits[_user].
 - **Checks**: msg.sender=mailNames; transfer succeeds.
-- **Effects**: Emits DepositLocked (user, index, amt, unlock); overrides prior timers? No—separate entries.
+- **Effects**: Emits DepositLocked (user, index, amt, unlock); separate entries—no override.
 
 #### withdraw(uint256 _index)
 - **Purpose**: Withdraws specific deposit (swap-pop for gas).

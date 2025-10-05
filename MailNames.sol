@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.6 (05/10/2025)
+// File Version: 0.0.7 (05/10/2025)
 // Changelog: 
+// - 0.0.7 (05/10): Ensured names can be renewed at any point after allowanceEnd. 
 // - 0.0.6 (05/10): Implemented checkin queue with token locks via MailLocker, dynamic min required (1*2^len wei, assume 18dec), wait (10m+6h*len, cap 2w); advance() external, called post-queue. Replaced checkIn with queueCheckIn queue system; added mailToken/mailLocker/owner/PendingCheckin/pendingCheckins/nextProcessIndex; setters; helpers for calc; advance processes one at a time.
 // - 0.0.5 (05/10): Fully implemented safeTransferFrom with onERC721Received check for contract receivers. 
 // - 0.0.4 (04/10): Fixed ownership to single ERC721 ownerOf (removed retainer/retainerNames), efficient balanceOf via counter, enumerable allNameHashes for getNameRecords, bidderNameHashes for getBidderBids, centralized _transfer, improved _findBestBid, fixed subname push syntax, removed getRetainerNames, safeTransferFrom direct call, consistency across functions
@@ -277,24 +278,23 @@ contract MailNames {
         nextProcessIndex++;
     }
 
-    // Changelog: 0.0.6 (05/10/2025) - Replaced checkIn: Queue during grace; transfer min to self then deposit to locker; push with calcs; call advance
-    function queueCheckIn(uint256 _nameHash) external {
-        uint256 tokenId = nameHashToTokenId[_nameHash];
-        require(tokenId != 0 && ownerOf[tokenId] == msg.sender, "Not owner");
-        NameRecord storage record = nameRecords[_nameHash];
-        require(block.timestamp <= record.allowanceEnd + GRACE_PERIOD, "Grace expired");
-        require(block.timestamp > record.allowanceEnd, "Not in grace");
-        uint256 queueLen = pendingCheckins.length - nextProcessIndex;
-        uint256 minRequired = _calculateMinRequired(queueLen);
-        IERC20(mailToken).transferFrom(msg.sender, address(this), minRequired);
-        uint8 decimals = IERC20(mailToken).decimals();
-        uint256 normalized = minRequired / (10 ** decimals);
-        MailLocker(mailLocker).depositLock(normalized, msg.sender, block.timestamp + 365 days * 10);
-        uint256 waitDuration = _calculateWaitDuration(queueLen);
-        pendingCheckins.push(PendingCheckin(_nameHash, msg.sender, block.timestamp, waitDuration));
-        emit QueueCheckInQueued(_nameHash, msg.sender, minRequired, waitDuration);
-        this.advance();
-    }
+// Changelog: 0.0.7 (05/10/2025) - Modified queueCheckIn: Allow post-grace (anytime after allowanceEnd); retain auto-settle in place*Bid on expired (post +GRACE_PERIOD)
+function queueCheckIn(uint256 _nameHash) external {
+    uint256 tokenId = nameHashToTokenId[_nameHash];
+    require(tokenId != 0 && ownerOf[tokenId] == msg.sender, "Not owner");
+    NameRecord storage record = nameRecords[_nameHash];
+    require(block.timestamp > record.allowanceEnd, "Not expired"); // Removed grace upper bound
+    uint256 queueLen = pendingCheckins.length - nextProcessIndex;
+    uint256 minRequired = _calculateMinRequired(queueLen);
+    IERC20(mailToken).transferFrom(msg.sender, address(this), minRequired);
+    uint8 decimals = IERC20(mailToken).decimals();
+    uint256 normalized = minRequired / (10 ** decimals);
+    MailLocker(mailLocker).depositLock(normalized, msg.sender, block.timestamp + 365 days * 10);
+    uint256 waitDuration = _calculateWaitDuration(queueLen);
+    pendingCheckins.push(PendingCheckin(_nameHash, msg.sender, block.timestamp, waitDuration));
+    emit QueueCheckInQueued(_nameHash, msg.sender, minRequired, waitDuration);
+    this.advance();
+}
 
     // Changelog: 0.0.6 (05/10/2025) - External advance: Processes one ready checkin (gas safe, callable anytime)
     function advance() external {
@@ -491,7 +491,7 @@ contract MailNames {
     }
     
     // Changelog: 0.0.6 (05/10/2025) - Added getName view: Resolves name string to owner address or reverts if unregistered
-function getName(string memory _name) external view returns (address owner) {
+function getName(string memory _name) external view returns (address _owner) {
     uint256 nameHash = _stringToHash(_name);
     uint256 tokenId = nameHashToTokenId[nameHash];
     require(tokenId != 0, "Name not registered!");
