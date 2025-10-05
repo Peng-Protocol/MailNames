@@ -1,11 +1,11 @@
 # MailNames
-**Version**: 0.0.8  
+**Version**: 0.0.9  
 **Date**: 05/10/2025  
 **SPDX-License-Identifier**: BSL 1.1 - Peng Protocol 2025  
 **Solidity Version**: ^0.8.2  
 
 ## Overview
-`MailNames` is a decentralized domain name system with ERC721 compatibility, enabling free name minting (tokenId from 0 upward) with a 1-year allowance and 30-day grace period. Owners can queue check-ins post-expiration (locks min token in `MailLocker` for 10y; dynamic wait 10min-2w). Bidding moved to `MailMarket` (ETH/ERC20, auto-settle post-grace). Supports subnames (transferred with parents) with custom records (strings <=1024 chars). Names limited to 24 chars. Primary for Chainmail (link unavailable). Ownership via `ownerOf`; transfers inherit allowance. Safe transfers enforce ERC721Receiver hooks.
+`MailNames` is a decentralized domain name system with ERC721 compatibility, enabling free name minting (tokenId from 0 upward) with a 1-year allowance and 30-day grace period. Owners queue check-ins post-expiration (locks min token in `MailLocker` for 10y; dynamic wait 10min-2w). Bidding handled by `MailMarket` (ETH/ERC20, auto-settle post-grace). Subnames transfer with parents, with custom records (strings <=1024 chars). Names limited to 24 chars. Primary for Chainmail (link unavailable). Ownership via `ownerOf`; transfers inherit allowance. Safe transfers enforce ERC721Receiver hooks.
 
 ## Structs
 - **NameRecord**: Stores domain details.
@@ -162,6 +162,13 @@
 - **Checks**: `_newOwner !=0`.
 - **Effects**: Sets `owner`, emits `OwnershipTransferred`.
 
+### acceptMarketBid(uint256 _nameHash, bool _isETH, address _token, uint256 _bidIndex)
+- **Purpose**: Allows owner to accept bid via `MailMarket`.
+- **Checks**: Caller=owner, within allowance, valid tokenId.
+- **Internal Calls**:
+  - `_settleBid`: Calls `MailMarket.settleBid`.
+- **Effects**: Triggers bid settlement, emits `BidSettled` via `MailMarket`.
+
 ### getName(string _name)
 - **Purpose**: Resolves name to owner.
 - **Internal Calls**:
@@ -191,28 +198,28 @@
 - **Returns**: `string[]`.
 
 ## Internal Functions
-- **_stringToHash(string _str)**: Generates keccak256 hash.
-- **_validateName(string _name)**: Checks length <=24, no spaces.
+- **_stringToHash(string _str)**: Generates keccak256 hash for storage/retrieval.
+- **_validateName(string _name)**: Ensures length <=24, no spaces, >0.
 - **_validateRecord(CustomRecord _record)**: Checks string lengths <=1024.
 - **_transfer(uint256 _tokenId, address _to)**: Updates `ownerOf`/`_balances`, emits `Transfer`.
-- **_isContract(address _account)**: Assembly check for contract.
-- **_checkOnERC721Received(address _to, address _from, uint256 _tokenId, bytes _data)**: Invokes receiver hook.
-- **_calculateMinRequired(uint256 _queueLen)**: 1 * 2^_queueLen wei.
+- **_isContract(address _account)**: Assembly check for contract detection.
+- **_checkOnERC721Received(address _to, address _from, uint256 _tokenId, bytes _data)**: Invokes receiver hook with try/catch.
+- **_calculateMinRequired(uint256 _queueLen)**: 1 * 2^_queueLen wei for checkin cost.
 - **_calculateWaitDuration(uint256 _queueLen)**: 10min + 6h*_queueLen, cap 2w.
-- **_processNextCheckin()**: Updates `allowanceEnd`, emits events.
-- **_processQueueRequirements()**: Locks tokens, calls `MailLocker.depositLock`.
+- **_processNextCheckin()**: Updates `allowanceEnd`, emits `NameCheckedIn`/`CheckInProcessed`.
+- **_processQueueRequirements()**: Locks tokens via `MailLocker.depositLock`.
 - **_settleBid(uint256 _nameHash, uint256 _bidIndex, bool _isETH, address _token)**: Calls `MailMarket.settleBid`, handles post-grace checkin.
 
 ## Key Insights
 - **ERC721 Integration**: `tokenId` enables standard transfers; `_balances` O(1); `nameHashToTokenId` speeds auth.
-- **Queue Mechanics**: Locks via `MailLocker`; `advance` O(1); transfers don’t cancel queue.
-- **Bidding**: Moved to `MailMarket`; `_settleBid` routes to `MailMarket.settleBid`.
-- **Fee Handling**: Handled in `MailMarket` for token bids.
+- **Queue Mechanics**: Locks via `MailLocker`; `advance` O(1); transfers don’t cancel queue; post-grace queues race bids.
+- **Bidding**: `MailMarket` handles ETH/ERC20 bids; `acceptMarketBid` enables owner-initiated settlements within allowance.
+- **Fee Handling**: Handled in `MailMarket` for token bids via `TokenTransferData`.
 - **DoS/Gas**: Paginated views, O(1) queue processing, assembly for `_isContract`.
-- **Ownership**: Unified via `ownerOf`.
-- **Grace/Queue**: Post-grace bids via `MailMarket`, queues race for renewal.
-- **Events**: ERC721 and custom; no emits in views.
-- **Degradation**: Reverts on critical failures; try/catch for hooks.
+- **Ownership**: Unified via `ownerOf`; `acceptMarketBid` ensures owner auth.
+- **Grace/Queue**: Post-grace bids via `MailMarket`, queues counter bids but risk race.
+- **Events**: ERC721 (`Transfer`/`Approval`/`ApprovalForAll`) and custom; no emits in views.
+- **Degradation**: Reverts on critical failures; try/catch for hooks; `advance` skips gracefully.
 
 ## MailLocker
 **Version**: 0.0.1  
@@ -234,7 +241,7 @@ Locks `MailToken` deposits from `MailNames` queues (10y unlock, multi-indexed). 
 
 ### External Functions and Call Trees
 #### depositLock(uint256 _normalizedAmount, address _user, uint256 _unlockTime) [only MailNames]
-- **Purpose**: Locks deposit.
+- **Purpose**: Locks deposit from `MailNames`.
 - **Checks**: Caller=`mailNames`, transfer succeeds.
 - **Effects**: Pushes to `userDeposits`, emits `DepositLocked`.
 
@@ -257,7 +264,7 @@ Locks `MailToken` deposits from `MailNames` queues (10y unlock, multi-indexed). 
 - **Effects**: Sets `owner`, emits `OwnershipTransferred`.
 
 #### getUserDeposits(address _user, uint256 _step, uint256 _maxIterations)
-- **Purpose**: Paginated deposits.
+- **Purpose**: Paginated deposits view.
 - **Returns**: `Deposit[]`.
 
 #### getTotalLocked(address _user)
@@ -265,14 +272,14 @@ Locks `MailToken` deposits from `MailNames` queues (10y unlock, multi-indexed). 
 - **Returns**: uint256 total.
 
 ### Key Insights
-- **Multi-Deposits**: Separate 10y locks per user.
+- **Multi-Deposits**: Separate 10y locks per user; withdraw by index.
 - **Normalization**: Stores sans decimals; transfers use decimals.
-- **Gas/DoS**: Swap-pop, paginated views.
+- **Gas/DoS**: Swap-pop on withdraw, paginated views.
 - **Events**: `DepositLocked`/`Withdrawn`.
-- **Degradation**: Reverts on critical failures.
+- **Degradation**: Reverts on invalid transfer/time.
 
 ## MailMarket
-**Version**: 0.0.1  
+**Version**: 0.0.2  
 **Date**: 05/10/2025  
 
 ### Overview
@@ -331,11 +338,11 @@ Handles bidding for `MailNames` (ETH/ERC20, auto-settle post-grace). Supports to
 - **Effects**: Transfers refund, emits `BidClosed`.
 
 #### acceptBid(uint256 _nameHash, bool _isETH, address _token, uint256 _bidIndex)
-- **Purpose**: Manual bid settlement.
-- **Checks**: Caller=owner, valid bid.
+- **Purpose**: Initiates owner-accepted bid.
+- **Checks**: None (delegates to `MailNames`).
 - **Internal Calls**:
-  - `this.settleBid`: Transfers funds, calls `MailNames.transfer`.
-- **Effects**: Transfers ownership, emits `BidSettled`.
+  - `MailNames.acceptMarketBid`: Validates owner, calls `settleBid`.
+- **Effects**: Triggers settlement via `MailNames`, emits `BidSettled`.
 
 #### settleBid(uint256 _nameHash, uint256 _bidIndex, bool _isETH, address _token)
 - **Purpose**: Settles bid (called by `MailNames`).
@@ -383,20 +390,21 @@ Handles bidding for `MailNames` (ETH/ERC20, auto-settle post-grace). Supports to
 ### Internal Functions
 - **_stringToHash(string _str)**: Generates keccak256 hash.
 - **_validateBidRequirements(string _name, uint256 _bidAmount)**: Validates name, amount, `mailToken`.
-- **_handleTokenTransfer(address _token, uint256 _amount)**: Computes received amount.
-- **_insertAndSort(Bid[100] storage bidsArray, Bid newBid)**: Sorts bids descending.
-- **_removeBidFromArray(Bid[100] storage bidsArray, uint256 _bidIndex)**: Clears bid.
-- **_transferBidFunds(address _oldOwner, uint256 _amount, bool _isETH, address _token)**: Transfers funds.
+- **_handleTokenTransfer(address _token, uint256 _amount)**: Computes received amount for token bids.
+- **_insertAndSort(Bid[100] storage bidsArray, Bid newBid)**: Sorts bids descending by amount, then timestamp.
+- **_removeBidFromArray(Bid[100] storage bidsArray, uint256 _bidIndex)**: Clears bid via shift.
+- **_transferBidFunds(address _oldOwner, uint256 _amount, bool _isETH, address _token)**: Transfers funds (ETH or token).
 - **_calculateMinRequired(uint256 _queueLen)**: 1 * 2^_queueLen wei.
 
 ### Key Insights
-- **Bidding**: ETH/ERC20 bids, auto-settle via `MailNames._settleBid`.
-- **Fee Handling**: `TokenTransferData` ensures accurate amounts.
-- **Gas/DoS**: Fixed 100 bids, sorted descending.
-- **Events**: `BidPlaced`/`BidSettled`/`BidClosed`/`TopBidInvalidated`.
+- **Bidding**: ETH/ERC20 bids; auto-settle post-grace via `MailNames._settleBid`; owner-initiated via `acceptBid` -> `MailNames.acceptMarketBid`.
+- **Fee Handling**: `TokenTransferData` ensures accurate token amounts.
+- **Gas/DoS**: Fixed 100 bids, sorted descending; paginated views.
+- **Events**: `BidPlaced`/`BidSettled`/`BidClosed`/`TopBidInvalidated`/`OwnershipTransferred`.
+- **Access Control**: `settleBid` restricted to `MailNames`; `acceptMarketBid` ensures owner auth.
 
 ## Notes
 - Deploy `MailLocker`, `MailMarket`, then `MailNames`.
 - Set `mailToken`/`mailLocker`/`mailMarket` post-deploy.
-- No `ReentrancyGuard` needed.
-- All on-chain; try/catch for hooks.
+- No `ReentrancyGuard` needed; no recursive calls.
+- All on-chain; try/catch for ERC721 hooks.
