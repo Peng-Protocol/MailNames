@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.5 (05/10/2025)
+// File Version: 0.0.6 (05/10/2025)
 // Changelog: 
+// - 0.0.6 (05/10): Implemented checkin queue with token locks via MailLocker, dynamic min required (1*2^len wei, assume 18dec), wait (10m+6h*len, cap 2w); advance() external, called post-queue. Replaced checkIn with queueCheckIn queue system; added mailToken/mailLocker/owner/PendingCheckin/pendingCheckins/nextProcessIndex; setters; helpers for calc; advance processes one at a time.
 // - 0.0.5 (05/10): Fully implemented safeTransferFrom with onERC721Received check for contract receivers. 
 // - 0.0.4 (04/10): Fixed ownership to single ERC721 ownerOf (removed retainer/retainerNames), efficient balanceOf via counter, enumerable allNameHashes for getNameRecords, bidderNameHashes for getBidderBids, centralized _transfer, improved _findBestBid, fixed subname push syntax, removed getRetainerNames, safeTransferFrom direct call, consistency across functions
 // - 0.0.3 (04/10): Added new functions, mappings and variables for ERC721 compatibility
@@ -27,6 +28,11 @@ interface IERC721Receiver {
         bytes calldata data
     ) external returns (bytes4);
 }
+
+    // Inline interface for MailLocker
+    interface MailLocker {
+        function depositLock(uint256 amount, address user, uint256 unlockTime) external;
+    }
 
 contract MailNames {
     // Structs for name, subname, and custom records
@@ -95,6 +101,36 @@ contract MailNames {
     event Transfer(address indexed from, address indexed to, uint256 indexed tokenId);
     event Approval(address indexed owner, address indexed approved, uint256 indexed tokenId);
     event ApprovalForAll(address indexed owner, address indexed operator, bool approved);
+    
+        // ownership event
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    
+        // Events (queue)
+    event QueueCheckInQueued(uint256 indexed nameHash, address indexed user, uint256 minRequired, uint256 waitDuration);
+    event CheckInProcessed(uint256 indexed nameHash, address indexed user);
+    
+        // state for queue/locker
+    address public owner;
+    address public mailToken;
+    address public mailLocker;
+    struct PendingCheckin {
+        uint256 nameHash;
+        address user;
+        uint256 queuedTime;
+        uint256 waitDuration;
+    }
+    PendingCheckin[] public pendingCheckins;
+    uint256 public nextProcessIndex;
+
+    // New: Owner init (called post-deploy)
+    constructor() {
+        owner = msg.sender;
+    }
+
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Not owner");
+        _;
+    }
 
     // Helper: Convert string to hash
     function _stringToHash(string memory _str) private pure returns (uint256) {
@@ -207,15 +243,69 @@ contract MailNames {
         emit SubnameMinted(parentHash, subnameHash, _subname, msg.sender);
     }
 
-    // Changelog: 0.0.4 (04/10/2025) - Use ownerOf check via nameHashToTokenId
-    function checkIn(uint256 _nameHash) external {
+    // Changelog: 0.0.6 (05/10/2025) - Setters for locker/token (owner-only)
+    function setMailToken(address _mailToken) external onlyOwner {
+        mailToken = _mailToken;
+    }
+
+    function setMailLocker(address _mailLocker) external onlyOwner {
+        mailLocker = _mailLocker;
+    }
+
+    // Helper: Calc min required wei (1 * 2^queueLen, assume 18dec token)
+    function _calculateMinRequired(uint256 _queueLen) private pure returns (uint256) {
+        return 1 * (2 ** _queueLen);
+    }
+
+    // Helper: Calc wait duration (10m + 6h * queueLen, cap 2w)
+    function _calculateWaitDuration(uint256 _queueLen) private pure returns (uint256) {
+        uint256 wait = 10 minutes + 6 hours * _queueLen;
+        return wait > 2 weeks ? 2 weeks : wait;
+    }
+
+    // Helper: Process next if ready (extends allowance, assumes still owner—risk if transferred)
+    function _processNextCheckin() private {
+        if (nextProcessIndex >= pendingCheckins.length) return;
+        PendingCheckin memory nextCheck = pendingCheckins[nextProcessIndex];
+        if (block.timestamp < nextCheck.queuedTime + nextCheck.waitDuration) return;
+        uint256 tokenId = nameHashToTokenId[nextCheck.nameHash];
+        require(tokenId != 0 && ownerOf[tokenId] == nextCheck.user, "No longer owner");
+        NameRecord storage record = nameRecords[nextCheck.nameHash];
+        record.allowanceEnd = block.timestamp + ALLOWANCE_PERIOD;
+        emit NameCheckedIn(nextCheck.nameHash, nextCheck.user);
+        emit CheckInProcessed(nextCheck.nameHash, nextCheck.user);
+        nextProcessIndex++;
+    }
+
+    // Changelog: 0.0.6 (05/10/2025) - Replaced checkIn: Queue during grace; transfer min to self then deposit to locker; push with calcs; call advance
+    function queueCheckIn(uint256 _nameHash) external {
         uint256 tokenId = nameHashToTokenId[_nameHash];
         require(tokenId != 0 && ownerOf[tokenId] == msg.sender, "Not owner");
         NameRecord storage record = nameRecords[_nameHash];
-        require(block.timestamp <= record.allowanceEnd + GRACE_PERIOD, "Grace period expired");
-        require(block.timestamp > record.allowanceEnd, "Must be within grace period");
-        record.allowanceEnd = block.timestamp + ALLOWANCE_PERIOD;
-        emit NameCheckedIn(_nameHash, msg.sender);
+        require(block.timestamp <= record.allowanceEnd + GRACE_PERIOD, "Grace expired");
+        require(block.timestamp > record.allowanceEnd, "Not in grace");
+        uint256 queueLen = pendingCheckins.length - nextProcessIndex;
+        uint256 minRequired = _calculateMinRequired(queueLen);
+        IERC20(mailToken).transferFrom(msg.sender, address(this), minRequired);
+        uint8 decimals = IERC20(mailToken).decimals();
+        uint256 normalized = minRequired / (10 ** decimals);
+        MailLocker(mailLocker).depositLock(normalized, msg.sender, block.timestamp + 365 days * 10);
+        uint256 waitDuration = _calculateWaitDuration(queueLen);
+        pendingCheckins.push(PendingCheckin(_nameHash, msg.sender, block.timestamp, waitDuration));
+        emit QueueCheckInQueued(_nameHash, msg.sender, minRequired, waitDuration);
+        this.advance();
+    }
+
+    // Changelog: 0.0.6 (05/10/2025) - External advance: Processes one ready checkin (gas safe, callable anytime)
+    function advance() external {
+        _processNextCheckin();
+    }
+    
+        // Changelog: 0.0.6 (05/10/2025) - Owner-only transferOwnership: Sets new owner, emits event
+    function transferOwnership(address _newOwner) external onlyOwner {
+        require(_newOwner != address(0), "Invalid owner");
+        owner = _newOwner;
+        emit OwnershipTransferred(msg.sender, _newOwner);
     }
 
     // Changelog: 0.0.4 (04/10/2025) - Add bidderNameHashes update
@@ -399,6 +489,14 @@ contract MailNames {
         nameRecords[_nameHash].customRecords[_index] = _record;
         emit RecordsUpdated(_nameHash, msg.sender);
     }
+    
+    // Changelog: 0.0.6 (05/10/2025) - Added getName view: Resolves name string to owner address or reverts if unregistered
+function getName(string memory _name) external view returns (address owner) {
+    uint256 nameHash = _stringToHash(_name);
+    uint256 tokenId = nameHashToTokenId[nameHash];
+    require(tokenId != 0, "Name not registered!");
+    return ownerOf[tokenId];
+}
 
     // Changelog: 0.0.4 (04/10/2025) - Use ownerOf check via nameHashToTokenId for parent
     function setSubnameRecord(uint256 _parentHash, uint256 _subnameIndex, uint256 _recordIndex, CustomRecord memory _record) external {
