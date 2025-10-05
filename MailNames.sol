@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.12 (05/10/2025)
+// File Version: 0.0.13 (05/10/2025)
 // Changelog:
-// - 0.0.12 (05/10): Removed bidding (ethBids, tokenBids, allowedTokens, tokenCounts, Bid struct, bidding events, _insertAndSort, _findBestBid, _checkAndTrimTopETH, placeETHBid, placeTokenBid, closeBid, acceptBid, checkTopBidder, getNameBids); added mailMarket address/setter; updated _settleBid to call MailMarket; removed _nameHash from _processQueueRequirements (unused)
-// - 0.0.11 (05/10): Added SettlementData struct, added _removeBidFromArray, _transferBidFunds, _handlePostGraceSettlement helpers, refactored _settleBid
-// - 0.0.10 (05/10): Added TokenTransferData, BidValidation structs, helpers, refactored queueCheckIn
+// - 0.0.13 (05/10): Added acceptMarketBid to call MailMarket.settleBid for owner-initiated bid acceptance
+// - 0.0.12 (05/10): Removed bidding, added mailMarket/setter, updated _settleBid, removed _nameHash from _processQueueRequirements
+// - 0.0.11 (05/10): Added SettlementData, _removeBidFromArray, _transferBidFunds, _handlePostGraceSettlement, refactored _settleBid
+// - 0.0.10 (05/10): Added TokenTransferData, BidValidation, helpers, refactored queueCheckIn
 // - 0.0.9 (05/10): Restructured bidding, added graceEnd
 // - 0.0.8 (05/10): Renewable names post-allowanceEnd
 // - 0.0.7 (05/10): Added transferOwnership
@@ -197,7 +198,6 @@ contract MailNames {
         }
     }
 
-    // Changelog: 0.0.12 (05/10/2025) - Removed _nameHash param (unused)
     function _processQueueRequirements() private returns (uint256 queueLen, uint256 minRequired) {
         queueLen = pendingCheckins.length - nextProcessIndex;
         minRequired = _calculateMinRequired(queueLen);
@@ -207,7 +207,6 @@ contract MailNames {
         MailLocker(mailLocker).depositLock(normalized, msg.sender, block.timestamp + 365 days * 10);
     }
 
-    // Changelog: 0.0.12 (05/10/2025) - Call MailMarket.settleBid, handle post-grace
     function _settleBid(uint256 _nameHash, uint256 _bidIndex, bool _isETH, address _token) private {
         SettlementData memory settlement;
         settlement.nameHash = _nameHash;
@@ -232,6 +231,15 @@ contract MailNames {
             pendingCheckins.push(PendingCheckin(_nameHash, ownerOf[settlement.tokenId], block.timestamp, waitDuration));
             emit QueueCheckInQueued(_nameHash, ownerOf[settlement.tokenId], minReq, waitDuration);
         }
+    }
+
+    // Changelog: 0.0.13 (05/10/2025) - Added to allow owner to accept bid via MailMarket
+    function acceptMarketBid(uint256 _nameHash, bool _isETH, address _token, uint256 _bidIndex) external {
+        uint256 tokenId = nameHashToTokenId[_nameHash];
+        require(tokenId != 0 && ownerOf[tokenId] == msg.sender, "Not owner");
+        NameRecord storage record = nameRecords[_nameHash];
+        require(block.timestamp <= record.allowanceEnd, "Allowance expired");
+        _settleBid(_nameHash, _bidIndex, _isETH, _token);
     }
 
     function mintName(string memory _name) external {

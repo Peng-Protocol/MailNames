@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.1 (05/10/2025)
+// File Version: 0.0.2 (05/10/2025)
 // Changelog:
-// - 0.0.1 (05/10): Initial implementation with bidding functionality from MailNames; added MailNames interface, settleBid function
+// - 0.0.2 (05/10): Updated acceptBid to call MailNames.acceptMarketBid; added OwnershipTransferred event
+// - 0.0.1 (05/10): Initial implementation with bidding from MailNames
 
 interface IERC20 {
     function decimals() external view returns (uint8);
@@ -16,6 +17,7 @@ interface MailNames {
     function ownerOf(uint256 tokenId) external view returns (address);
     function nameHashToTokenId(uint256 nameHash) external view returns (uint256);
     function transfer(uint256 tokenId, address to) external;
+    function acceptMarketBid(uint256 _nameHash, bool _isETH, address _token, uint256 _bidIndex) external;
 }
 
 contract MailMarket {
@@ -56,7 +58,6 @@ contract MailMarket {
     event TokenRemoved(address indexed token);
     event TopBidInvalidated(uint256 indexed nameHash);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
-
 
     constructor() {
         owner = msg.sender;
@@ -155,7 +156,7 @@ contract MailMarket {
         validation.tokenId = MailNames(mailNames).nameHashToTokenId(validation.nameHash);
         require(validation.tokenId != 0, "Name not minted");
         require(_bidAmount > 0, "Invalid bid amount");
-        validation.queueLen = 0; // Queue length handled by MailNames
+        validation.queueLen = 0;
         validation.minReq = _calculateMinRequired(validation.queueLen);
         uint8 dec = IERC20(mailToken).decimals();
         validation.normMin = validation.minReq / (10 ** dec);
@@ -176,7 +177,6 @@ contract MailMarket {
         return data.receivedAmount;
     }
 
-    // Changelog: 0.0.1 (05/10/2025) - Moved from MailNames, calls MailNames.transfer
     function settleBid(uint256 _nameHash, uint256 _bidIndex, bool _isETH, address _token) external {
         require(msg.sender == mailNames, "Only MailNames");
         Bid memory bid = _isETH ? ethBids[_nameHash][_bidIndex] : tokenBids[_nameHash][_token][_bidIndex];
@@ -228,10 +228,9 @@ contract MailMarket {
         emit BidClosed(_nameHash, msg.sender, bid.amount, _isETH);
     }
 
+    // Changelog: 0.0.2 (05/10/2025) - Updated to call MailNames.acceptMarketBid
     function acceptBid(uint256 _nameHash, bool _isETH, address _token, uint256 _bidIndex) external {
-        uint256 tokenId = MailNames(mailNames).nameHashToTokenId(_nameHash);
-        require(tokenId != 0 && MailNames(mailNames).ownerOf(tokenId) == msg.sender, "Not owner");
-        this.settleBid(_nameHash, _bidIndex, _isETH, _token);
+        MailNames(mailNames).acceptMarketBid(_nameHash, _isETH, _token, _bidIndex);
     }
 
     function checkTopBidder(uint256 _nameHash) external returns (address topBidder, uint256 topAmount, bool valid) {
