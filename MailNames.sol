@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.4 (04/10/2025)
-// Changelog:
+// File Version: 0.0.5 (05/10/2025)
+// Changelog: 
+// - 0.0.5 (05/10): Fully implemented safeTransferFrom with onERC721Received check for contract receivers. 
 // - 0.0.4 (04/10): Fixed ownership to single ERC721 ownerOf (removed retainer/retainerNames), efficient balanceOf via counter, enumerable allNameHashes for getNameRecords, bidderNameHashes for getBidderBids, centralized _transfer, improved _findBestBid, fixed subname push syntax, removed getRetainerNames, safeTransferFrom direct call, consistency across functions
 // - 0.0.3 (04/10): Added new functions, mappings and variables for ERC721 compatibility
 // - 0.0.2 (03/10): Added getBidderNameBids for granular bid retrieval
@@ -15,6 +16,16 @@ interface IERC20 {
     function balanceOf(address account) external view returns (uint256);
     function transfer(address to, uint256 amount) external returns (bool);
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
+}
+
+// Inline interface for ERC721 receivers
+interface IERC721Receiver {
+    function onERC721Received(
+        address operator,
+        address from,
+        uint256 tokenId,
+        bytes calldata data
+    ) external returns (bytes4);
 }
 
 contract MailNames {
@@ -349,14 +360,34 @@ contract MailNames {
         require(nameHash != 0, "Invalid tokenId");
         _transfer(_tokenId, _to);
     }
+    
+       // Helper: Checks if address is contract (non-zero code length)
+    function _isContract(address _account) private view returns (bool) {
+        uint256 size;
+        assembly {
+            size := extcodesize(_account)
+        }
+        return size > 0;
+    }
+    
+        // Helper: Checks if receiver is contract and calls onERC721Received, reverts if fails
+    function _checkOnERC721Received(address _to, address _from, uint256 _tokenId, bytes memory _data) private {
+        if (_isContract(_to)) {
+            try IERC721Receiver(_to).onERC721Received(msg.sender, _from, _tokenId, _data) returns (bytes4 retval) {
+                require(retval == IERC721Receiver.onERC721Received.selector, "ERC721: transfer to non ERC721Receiver implementer");
+            } catch {
+                revert("ERC721: transfer to non ERC721Receiver implementer");
+            }
+        }
+    }
 
-    // Changelog: 0.0.4 (04/10/2025) - Removed allowanceEnd update
-    function safeTransferFrom(address _from, address _to, uint256 _tokenId, bytes memory /*_data*/) external {
+    // Changelog: 0.0.5 (05/10/2025) - Added IERC721Receiver interface above contract; implemented full safeTransferFrom with _checkOnERC721Received call after _transfer to ensure receiver hook succeeds if _to is contract
+    function safeTransferFrom(address _from, address _to, uint256 _tokenId, bytes memory _data) external {
         require(_from == ownerOf[_tokenId], "Wrong from");
         uint256 nameHash = tokenIdToNameHash[_tokenId];
         require(nameHash != 0, "Invalid tokenId");
         _transfer(_tokenId, _to);
-        // Defer: require(_checkOnERC721Received(_to, _from, _tokenId, _data));
+        _checkOnERC721Received(_to, _from, _tokenId, _data);
     }
 
     // Changelog: 0.0.4 (04/10/2025) - Use ownerOf check via nameHashToTokenId

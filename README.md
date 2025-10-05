@@ -1,11 +1,11 @@
 # MailNames
-**Version**: 0.0.4
-**Date**: 04/10/2025  
+**Version**: 0.0.5
+**Date**: 05/10/2025  
 **SPDX-License-Identifier**: BSL 1.1 - Peng Protocol 2025  
 **Solidity Version**: ^0.8.2  
 
 ## Overview
-`MailNames` is a decentralized domain name system inspired by ENS with ERC721 compatibility, enabling free name minting (indexed by tokenId from 0 upward) with a 1-year allowance and 30-day grace period for check-ins. Post-grace, highest ETH bid or oldest ERC20 bid claims via auto-settlement. Supports subnames (implicitly transferred with parents) with custom records (strings <=1024 chars), controlled by parent owners. Bidding in ETH/ERC20 with fee-on-transfer handling. Names limited to 24 chars. Primary for Chainmail (link unavailable). Ownership unified under ERC721 `ownerOf`; transferred names inherit allowance.
+`MailNames` is a decentralized domain name system inspired by ENS with ERC721 compatibility, enabling free name minting (indexed by tokenId from 0 upward) with a 1-year allowance and 30-day grace period for check-ins. Post-grace, highest ETH bid or oldest ERC20 bid claims via auto-settlement. Supports subnames (implicitly transferred with parents) with custom records (strings <=1024 chars), controlled by parent owners. Bidding in ETH/ERC20 with fee-on-transfer handling. Names limited to 24 chars. Primary for Chainmail (link unavailable). Ownership unified under ERC721 `ownerOf`; transferred names inherit allowance. Safe transfers enforce ERC721Receiver hooks for contract recipients.
 
 ## Structs
 - **NameRecord**: Stores domain details.
@@ -137,13 +137,15 @@
 - **Params/Interactions**: Global for caller’s tokens.
 - **Effects**: Updates isApprovedForAll[msg.sender][_operator], emits ApprovalForAll.
 
-### safeTransferFrom(address _from, address _to, uint256 _tokenId, bytes memory /*_data*/)
-- **Purpose**: Safe ERC721 transfer (stubs _data; verifies _from==ownerOf).
-- **Params/Interactions**: Delegates to _transfer.
-- **Checks**: _from==ownerOf[_tokenId], tokenId valid.
+### safeTransferFrom(address _from, address _to, uint256 _tokenId, bytes memory _data)
+- **Purpose**: Safe ERC721 transfer (verifies _from==ownerOf; supports _data for hooks).
+- **Params/Interactions**: _tokenId (0+); checks if _to is contract via _isContract (assembly extcodesize>0), calls onERC721Received if so (try/catch reverts on failure/mismatch).
+- **Checks**: _from==ownerOf[_tokenId], tokenId valid (nameHash!=0), receiver hook succeeds.
 - **Internal Calls**:
-  - `_transfer`: Updates ownerOf/_balances, emits Transfer.
-- **Effects**: Standard safe transfer; future: add ERC721Receiver check.
+  - `_transfer`: Updates ownerOf/_balances, emits Transfer (pre-hook).
+  - `_checkOnERC721Received`: Invokes IERC721Receiver(_to).onERC721Received(msg.sender, _from, _tokenId, _data) post-transfer; reverts if non-compliant (ensures atomicity—transfer only if hook ok).
+  - `_isContract`: Determines if _to needs hook (size>0).
+- **Effects**: Full ERC721 safe transfer with receiver verification; subnames implicit, inherits allowance.
 
 ### balanceOf(address _owner)
 - **Purpose**: Returns owner's name count (ERC721).
@@ -217,20 +219,21 @@
 - **_settleBid(uint256 _nameHash, uint256 _bidIndex)**: Resolves bid from bids[], transfers to old owner (ETH direct/token*decimals), calls _transfer (updates ownerOf/_balances, emits Transfer); called by place*Bid (auto via _findBestBid) or acceptBid (manual)—syncs ERC721 on all ownership changes, no allowance reset.
 - **_transfer(uint256 _tokenId, address _to)**: Central auth/update for transfers (verifies caller/owner/approved/operator, updates ownerOf/_balances, clears getApproved, emits Transfer); invoked by transferName/transferFrom/safeTransferFrom/acceptBid (via _settleBid)/place*Bid (via _settleBid) for consistent ERC721 handling.
 - **_validateRecord(CustomRecord _record)**: bytes.length <=1024 for text/resolver/contentHash; used by set*Record to prevent gas bombs in storage.
+- **_checkOnERC721Received(address _to, address _from, uint256 _tokenId, bytes memory _data)**: Called by safeTransferFrom post-_transfer; uses try/catch to invoke IERC721Receiver hook on contract _to, reverts on failure/non-match (ensures safe atomicity; graceful revert only on hook error, not full tx rollback).
+- **_isContract(address _account)**: Assembly extcodesize>0 check; supports _checkOnERC721Received by identifying contract recipients needing hooks, avoiding unnecessary calls to EOAs.
 
 ## Key Insights
-- **ERC721 Integration**: tokenId enables standard transfers/approvals; _balances O(1) counter avoids loops; nameHashToTokenId speeds owner checks. Subnames bundle with parents—no separate tokens, reducing complexity/gas.
+- **ERC721 Integration**: tokenId enables standard transfers/approvals; _balances O(1) counter avoids loops; nameHashToTokenId speeds owner checks. Subnames bundle with parents—no separate tokens, reducing complexity/gas. SafeTransferFrom now atomic with hooks via _checkOnERC721Received/_isContract, preventing stuck transfers to non-compliant contracts.
 - **Settlement Dual-Use**: _settleBid handles manual (acceptBid, during allowance) vs. auto (place*Bid post-grace via _findBestBid); routes through _transfer for uniform ERC721 events/fund xfers, inherits allowance to enforce checkIn mechanics.
 - **Fee Handling**: placeTokenBid computes receivedAmount via balance delta/decimals, storing accurate bid.amount for refunds/settles—robust for tax tokens.
-- **DoS/Gas Mitigations**: Swap-and-pop in closeBid; paginated views (step/maxIterations) for arrays; allNameHashes/bidderNameHashes enable efficient enumeration without hash scans; no fixed loops.
+- **DoS/Gas Mitigations**: Swap-and-pop in closeBid; paginated views (step/maxIterations) for arrays; allNameHashes/bidderNameHashes enable efficient enumeration without hash scans; no fixed loops; _isContract assembly for cheap contract detection.
 - **Ownership Sync**: Single source via ownerOf[tokenId]; all functions resolve via nameHashToTokenId for quick auth, transfers via _transfer prevent inconsistencies.
 - **String Limits**: Enforced at mint/set (24/1024 chars) to cap gas; keccak256 on short names cheap.
 - **Bid Granularity**: bidderBids indices + bidderNameHashes enable O(1) retrieval in getBidderNameBids/getBidderBids without full scans; auto-clean on closeBid.
 - **Grace/Auto-Settle**: Prevents premature claims; _findBestBid prioritizes ETH value > ERC20 age for auction fairness; no renewal on transfer/settle avoids spam.
 - **Events**: Standard ERC721 (Transfer/Approval/ApprovalForAll) + custom for bids/records; no emits in views.
-- **Degradation**: Reverts only on critical (e.g., invalid auth/transfer fail); descriptive strings.
+- **Degradation**: Reverts only on critical (e.g., invalid auth/transfer fail); descriptive strings; safeTransferFrom uses try/catch for hook failures without broader impact.
 
 ## Notes
 - No ReentrancyGuard needed (no recursive calls); transfers post-state updates.
-- All on-chain; graceful via checks, no try/catch.
-- Removed retainerNames/getRetainerNames for gas; use Transfer events for off-chain owner lists.
+- All on-chain; graceful via checks, try/catch in hooks.
