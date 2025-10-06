@@ -1,5 +1,6 @@
+<xaiArtifact artifact_id="mailnames-readme-updated" artifact_version_id="1" title="README.md" contentType="text/markdown">
 # MailNames
-**Version**: 0.0.9  
+**Version**: 0.0.15  
 **Date**: 06/10/2025  
 **SPDX-License-Identifier**: BSL 1.1 - Peng Protocol 2025  
 **Solidity Version**: ^0.8.2  
@@ -8,11 +9,11 @@
 `MailNames` is a decentralized domain name system with ERC721 compatibility, enabling free name minting with a 1-year allowance. 
 
 ### Renewal 
-Names can only be renewed using "check-ins" and only during the 30-day grace period after their allowance ends. 
+Names can only be renewed using "check-ins" during a 7-day grace period after the name's allowance ends.
 
 - **Check-ins:** A check-in is a 10 year lockup of $MAIL (handled by `MailLocker`) required to renew a name. Check-ins are queued and can take a minimum of 10 minutes or maximum of 2 weeks, the time and amount required depend on the number of active check-ins waiting in queue. 
 
-- **Retention:** Renewal is not strictly required to retain a name, however, after the grace-period; if any active ETH bids exist for the name, the system will settle the name to the highest ETH bidder. In this way only high value names require continuous renewal.
+- **Retention:** Renewal is not strictly required to retain a name, however, after the primary grace-period; if any active ETH bids exist for the name, the system will settle the name to the highest ETH bidder after an additional 3-week secondary grace period. In this way only high value names require continuous renewal.
 
 - **Wait Dynamics:** Because the check-in wait time is sandwiched within a one month grace period;
 for valuable names, this forces the user to initiate renewal at any point during the first two weeks of their grace, absorbing any lock-up amount required to retain the name, or losing the name to the highest bidder. 
@@ -45,6 +46,12 @@ MailNames is the primary name system for Chainmail (link unavailable).
   - `user`: Owner address.
   - `queuedTime`: Block timestamp at queue.
   - `waitDuration`: Wait (10min + 6h*queueLen, cap 2w).
+- **PendingSettlement**: Stores queued settlement details.
+  - `nameHash`: Name to settle.
+  - `bidIndex`: Bid index in `MailMarket`.
+  - `isETH`: True if ETH bid.
+  - `token`: Token address (if ERC20).
+  - `queueTime`: Block timestamp at queue.
 - **CustomRecord**: Stores metadata (strings <=1024 chars).
   - `text`: General text (e.g., description).
   - `resolver`: Resolver info.
@@ -71,13 +78,14 @@ MailNames is the primary name system for Chainmail (link unavailable).
 - `getApproved`: Maps `uint256` (tokenId) to `address` (spender).
 - `isApprovedForAll`: Maps `address` to `mapping(address => bool)` (owner => operator => approved).
 - `pendingCheckins`: Array of `PendingCheckin`.
+- `pendingSettlements`: Array of `PendingSettlement`.
 - `nextProcessIndex`: uint256 (processed queue position).
 - `owner`: address (contract owner).
 - `mailToken`: address (ERC20 token).
 - `mailLocker`: address (MailLocker contract).
 - `mailMarket`: address (MailMarket contract).
 - `ALLOWANCE_PERIOD`: 365 days.
-- `GRACE_PERIOD`: 30 days.
+- `GRACE_PERIOD`: 7 days.
 - `MAX_NAME_LENGTH`: 24.
 - `MAX_STRING_LENGTH`: 1024.
 
@@ -104,7 +112,7 @@ MailNames is the primary name system for Chainmail (link unavailable).
 - **Purpose**: Processes one ready checkin.
 - **Checks**: Time/user eligibility.
 - **Internal Calls**:
-  - `_processNextCheckin`: Updates `allowanceEnd`, emits `NameCheckedIn`/`CheckInProcessed`.
+  - `_processNextCheckin`: Updates `allowanceEnd`, clears `pendingSettlements`, emits `NameCheckedIn`/`CheckInProcessed`.
 - **Effects**: Increments `nextProcessIndex`.
 
 ### transferName(uint256 _nameHash, address _newOwner)
@@ -186,8 +194,15 @@ MailNames is the primary name system for Chainmail (link unavailable).
 - **Purpose**: Allows owner to accept bid via `MailMarket`.
 - **Checks**: Caller=owner, within allowance, valid tokenId.
 - **Internal Calls**:
-  - `_settleBid`: Calls `MailMarket.settleBid`.
-- **Effects**: Triggers bid settlement, emits `BidSettled` via `MailMarket`.
+  - `_settleBid`: Queues or settles via `MailMarket.settleBid`.
+- **Effects**: Triggers settlement, emits `BidSettled` via `MailMarket`.
+
+### processSettlement(uint256 _index)
+- **Purpose**: Processes queued settlement after 3 weeks.
+- **Checks**: Valid index, time elapsed.
+- **Internal Calls**:
+  - `MailMarket.settleBid`: Executes settlement.
+- **Effects**: Resets `graceEnd`, swaps/pops queue, emits `SettlementProcessed`.
 
 ### getName(string _name)
 - **Purpose**: Resolves name to owner.
@@ -195,9 +210,27 @@ MailNames is the primary name system for Chainmail (link unavailable).
   - `_stringToHash`: Name hash.
 - **Returns**: address (`ownerOf`).
 
-### getNameRecords(uint256 step, uint256 maxIterations)
-- **Purpose**: Paginated name query.
-- **Returns**: `NameRecord[]`.
+### getNameRecords(string _name)
+- **Purpose**: Resolves name to NameRecord.
+- **Internal Calls**:
+  - `_stringToHash`: Name hash.
+- **Returns**: `NameRecord` (single record).
+
+### getSettlementById(uint256 _index)
+- **Purpose**: Returns PendingSettlement for given index.
+- **Checks**: Valid index.
+- **Returns**: `PendingSettlement` (single struct).
+
+### getPendingSettlements(string _name, uint256 _step, uint256 _maxIterations)
+- **Purpose**: Paginated pending settlements for a name.
+- **Internal Calls**:
+  - `_stringToHash`: Name hash.
+- **Returns**: `PendingSettlement[]`.
+
+### getNameByTokenId(uint256 _tokenId)
+- **Purpose**: Resolves tokenId to name string.
+- **Checks**: Token minted.
+- **Returns**: string (`nameRecords[nameHash].name`).
 
 ### getSubnameID(string _parentName, string _subname)
 - **Purpose**: Finds subname index.
@@ -211,7 +244,7 @@ MailNames is the primary name system for Chainmail (link unavailable).
   - `_stringToHash`, `this.getSubnameID`.
 - **Returns**: `CustomRecord[5]`.
 
-### getSubnames(string _parentName, uint256 step, uint256 maxIterations)
+### getSubnames(string _parentName, uint256 step, uint256 _maxIterations)
 - **Purpose**: Paginated subname strings.
 - **Internal Calls**:
   - `_stringToHash`.
@@ -226,20 +259,22 @@ MailNames is the primary name system for Chainmail (link unavailable).
 - **_checkOnERC721Received(address _to, address _from, uint256 _tokenId, bytes _data)**: Invokes receiver hook with try/catch.
 - **_calculateMinRequired(uint256 _queueLen)**: 1 * 2^_queueLen wei for checkin cost.
 - **_calculateWaitDuration(uint256 _queueLen)**: 10min + 6h*_queueLen, cap 2w.
-- **_processNextCheckin()**: Updates `allowanceEnd`, emits `NameCheckedIn`/`CheckInProcessed`.
+- **_processNextCheckin()**: Updates `allowanceEnd`, clears `pendingSettlements`, emits `NameCheckedIn`/`CheckInProcessed`.
 - **_processQueueRequirements()**: Locks tokens via `MailLocker.depositLock`.
-- **_settleBid(uint256 _nameHash, uint256 _bidIndex, bool _isETH, address _token)**: Calls `MailMarket.settleBid`, handles post-grace checkin.
+- **_settleBid(uint256 _nameHash, uint256 _bidIndex, bool _isETH, address _token)**: Queues settlement if post-grace (3w delay), immediate otherwise; handles checkin queueing.
+- **_clearPendingSettlements(uint256 _nameHash)**: Removes all pending settlements for a name on renewal.
 
 ## Key Insights
 - **ERC721 Integration**: `tokenId` enables standard transfers; `_balances` O(1); `nameHashToTokenId` speeds auth.
-- **Queue Mechanics**: Locks via `MailLocker`; `advance` O(1); transfers don’t cancel queue; post-grace queues race bids.
-- **Bidding**: `MailMarket` handles ETH/ERC20 bids; `acceptMarketBid` enables owner-initiated settlements within allowance.
-- **Fee Handling**: Handled in `MailMarket` for token bids via `TokenTransferData`.
-- **DoS/Gas**: Paginated views, O(1) queue processing, assembly for `_isContract`.
+- **Queue Mechanics**: Locks via `MailLocker`; `advance` O(1); transfers don’t cancel queue; post-grace settlements queued for 3 weeks, cleared on renewal via `_clearPendingSettlements`.
+- **Bidding**: `MailMarket` handles ETH/ERC20 bids; `acceptMarketBid` enables owner-initiated settlements within allowance; `processSettlement` for post-grace.
+- **Settlement Management**: `pendingSettlements` uses swap-and-pop for removals (`processSettlement`, `_clearPendingSettlements`), preventing gaps; only one settlement finalizes per name.
+- **Fee Handling**: Handled in `MailMarket` via `TokenTransferData`.
+- **Gas/DoS**: Paginated views (`getPendingSettlements`, `getSubnames`), O(1) queue processing, swap-pop for settlements/checkins, assembly for `_isContract`.
 - **Ownership**: Unified via `ownerOf`; `acceptMarketBid` ensures owner auth.
-- **Grace/Queue**: Post-grace bids via `MailMarket`, queues counter bids but risk race.
-- **Events**: ERC721 (`Transfer`/`Approval`/`ApprovalForAll`) and custom; no emits in views.
-- **Degradation**: Reverts on critical failures; try/catch for hooks; `advance` skips gracefully.
+- **Grace/Queue**: 7-day primary grace; post-grace bids queue for 3 weeks; renewals clear settlements, preserving bids for later acceptance.
+- **Events**: ERC721 (`Transfer`/`Approval`/`ApprovalForAll`) and custom (`SettlementProcessed`); no emits in views.
+- **Degradation**: Reverts on critical failures; try/catch for hooks; `advance`/`processSettlement` skip gracefully.
 
 ## MailLocker
 **Version**: 0.0.1  
@@ -303,7 +338,7 @@ Locks `MailToken` deposits from `MailNames` queues (10y unlock, multi-indexed). 
 **Date**: 05/10/2025  
 
 ### Overview
-Handles bidding for `MailNames` (ETH/ERC20, auto-settle post-grace). Supports token bids with tax token handling. Owner-set `mailNames`/`mailToken`.
+Handles bidding for `MailNames` (ETH/ERC20, auto-settle post-grace via queue). Supports token bids with tax token handling. Owner-set `mailNames`/`mailToken`.
 
 ### Structs
 - **Bid**: 
@@ -417,7 +452,7 @@ Handles bidding for `MailNames` (ETH/ERC20, auto-settle post-grace). Supports to
 - **_calculateMinRequired(uint256 _queueLen)**: 1 * 2^_queueLen wei.
 
 ### Key Insights
-- **Bidding**: ETH bids; auto-settle post-grace via `MailNames._settleBid`; owner-initiated via `acceptBid` -> `MailNames.acceptMarketBid`.
+- **Bidding**: ETH bids; auto-settle post-grace via `MailNames._settleBid` (queued for 3w); owner-initiated via `acceptBid` -> `MailNames.acceptMarketBid`.
 - **Fee Handling**: `TokenTransferData` ensures accurate token amounts.
 - **Gas/DoS**: Fixed 100 bids, sorted descending; paginated views.
 - **Events**: `BidPlaced`/`BidSettled`/`BidClosed`/`TopBidInvalidated`/`OwnershipTransferred`.
@@ -426,4 +461,4 @@ Handles bidding for `MailNames` (ETH/ERC20, auto-settle post-grace). Supports to
 ## Notes
 - No `ReentrancyGuard` needed; no recursive calls.
 - All on-chain; try/catch for ERC721 hooks.
-- If a user creates an automated script to indefinitely renew a name; if the name is valuable enough, other users may crowd out the script by selectively renewing their names during the script's grace period, thereby causing a lock-up price hike and forcing the script to spend all its tokens before its lockup withdrawals can replenish its balance. 
+- Automated renewal scripts can be outbid by users renewing during the script’s grace period, increasing lock-up costs and depleting script tokens before withdrawals.

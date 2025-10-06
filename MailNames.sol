@@ -1,8 +1,15 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.13 (05/10/2025)
+// File Version: 0.0.20 (06/10/2025)
 // Changelog:
+// - 0.0.20 (06/10): Updated getNameRecords to return single record; added getSettlementById
+// - 0.0.19 (06/10): Updated getNameRecords, getPendingSettlements to use name string
+// - 0.0.18 (06/10): Added getPendingSettlements for paginated view
+// - 0.0.17 (06/10): Removed queueSettlement; updated _settleBid to handle all post-grace queuing
+// - 0.0.16 (06/10): Changed GRACE_PERIOD to 7 days; updated _processNextCheckin to clear pendingSettlements on renewal
+// - 0.0.15 (06/10): Added getNameByTokenId to retrieve name string by token ID
+// - 0.0.14 (06/10): Added PendingSettlement struct, processSettlement; updated _settleBid to queue post-grace settlements
 // - 0.0.13 (05/10): Added acceptMarketBid to call MailMarket.settleBid for owner-initiated bid acceptance
 // - 0.0.12 (05/10): Removed bidding, added mailMarket/setter, updated _settleBid, removed _nameHash from _processQueueRequirements
 // - 0.0.11 (05/10): Added SettlementData, _removeBidFromArray, _transferBidFunds, _handlePostGraceSettlement, refactored _settleBid
@@ -69,12 +76,28 @@ contract MailNames {
         uint256 amount;
         bool postGrace;
     }
+    
+    struct PendingCheckin {
+        uint256 nameHash;
+        address user;
+        uint256 queuedTime;
+        uint256 waitDuration;
+    }
+    
+            // New (0.0.14) struct for pending settlements
+        struct PendingSettlement {
+            uint256 nameHash;
+            uint256 bidIndex;
+            bool isETH;
+            address token;
+            uint256 queueTime;
+        }
 
     mapping(uint256 => NameRecord) private nameRecords;
     mapping(uint256 => SubnameRecord[]) private subnameRecords;
     uint256[] private allNameHashes;
     uint256 public constant ALLOWANCE_PERIOD = 365 days;
-    uint256 public constant GRACE_PERIOD = 30 days;
+    uint256 public constant GRACE_PERIOD = 7 days;
     uint256 public constant MAX_NAME_LENGTH = 24;
     uint256 public constant MAX_STRING_LENGTH = 1024;
 
@@ -90,13 +113,10 @@ contract MailNames {
     address public mailToken;
     address public mailLocker;
     address public mailMarket;
+    
+            // New (0.0.14) array to store pending settlements
+        PendingSettlement[] public pendingSettlements;
 
-    struct PendingCheckin {
-        uint256 nameHash;
-        address user;
-        uint256 queuedTime;
-        uint256 waitDuration;
-    }
     PendingCheckin[] public pendingCheckins;
     uint256 public nextProcessIndex;
 
@@ -111,6 +131,8 @@ contract MailNames {
     event Approval(address indexed owner, address indexed approved, uint256 indexed tokenId);
     event ApprovalForAll(address indexed owner, address indexed operator, bool approved);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+          // New (0.0.14) events for settlement queueing and processing
+        event SettlementProcessed(uint256 indexed nameHash, address newOwner);
 
     constructor() {
         owner = msg.sender;
@@ -207,31 +229,51 @@ contract MailNames {
         MailLocker(mailLocker).depositLock(normalized, msg.sender, block.timestamp + 365 days * 10);
     }
 
-    function _settleBid(uint256 _nameHash, uint256 _bidIndex, bool _isETH, address _token) private {
-        SettlementData memory settlement;
-        settlement.nameHash = _nameHash;
-        settlement.tokenId = nameHashToTokenId[_nameHash];
-        settlement.oldOwner = ownerOf[settlement.tokenId];
-        settlement.postGrace = block.timestamp > nameRecords[_nameHash].graceEnd;
+         // Changelog: 0.0.17 (06/10/2025) - Queues post-grace settlements, handles checkin
+        function _settleBid(uint256 _nameHash, uint256 _bidIndex, bool _isETH, address _token) private {
+            SettlementData memory settlement;
+            settlement.nameHash = _nameHash;
+            settlement.tokenId = nameHashToTokenId[_nameHash];
+            settlement.oldOwner = ownerOf[settlement.tokenId];
+            settlement.postGrace = block.timestamp > nameRecords[_nameHash].graceEnd;
 
-        MailMarket(mailMarket).settleBid(_nameHash, _bidIndex, _isETH, _token);
+            if (settlement.postGrace) {
+                pendingSettlements.push(PendingSettlement(_nameHash, _bidIndex, _isETH, _token, block.timestamp));
+            } else {
+                MailMarket(mailMarket).settleBid(_nameHash, _bidIndex, _isETH, _token);
+            }
 
-        if (settlement.postGrace) {
-            NameRecord storage record = nameRecords[_nameHash];
-            record.graceEnd = block.timestamp + GRACE_PERIOD;
-            emit GraceReset(_nameHash, ownerOf[settlement.tokenId]);
-            uint256 queueLen = pendingCheckins.length - nextProcessIndex;
-            uint256 minReq = _calculateMinRequired(queueLen);
-            uint8 dec = IERC20(mailToken).decimals();
-            uint256 normMin = minReq / (10 ** dec);
-            require(IERC20(mailToken).balanceOf(ownerOf[settlement.tokenId]) >= normMin, "New owner insufficient MAIL");
-            IERC20(mailToken).transferFrom(ownerOf[settlement.tokenId], address(this), minReq);
-            MailLocker(mailLocker).depositLock(normMin, ownerOf[settlement.tokenId], block.timestamp + 365 days * 10);
-            uint256 waitDuration = _calculateWaitDuration(queueLen);
-            pendingCheckins.push(PendingCheckin(_nameHash, ownerOf[settlement.tokenId], block.timestamp, waitDuration));
-            emit QueueCheckInQueued(_nameHash, ownerOf[settlement.tokenId], minReq, waitDuration);
+            if (settlement.postGrace) {
+                NameRecord storage record = nameRecords[_nameHash];
+                record.graceEnd = block.timestamp + GRACE_PERIOD;
+                emit GraceReset(_nameHash, ownerOf[settlement.tokenId]);
+                uint256 queueLen = pendingCheckins.length - nextProcessIndex;
+                uint256 minReq = _calculateMinRequired(queueLen);
+                uint8 dec = IERC20(mailToken).decimals();
+                uint256 normMin = minReq / (10 ** dec);
+                require(IERC20(mailToken).balanceOf(ownerOf[settlement.tokenId]) >= normMin, "New owner insufficient MAIL");
+                IERC20(mailToken).transferFrom(ownerOf[settlement.tokenId], address(this), minReq);
+                MailLocker(mailLocker).depositLock(normMin, ownerOf[settlement.tokenId], block.timestamp + 365 days * 10);
+                uint256 waitDuration = _calculateWaitDuration(queueLen);
+                pendingCheckins.push(PendingCheckin(_nameHash, ownerOf[settlement.tokenId], block.timestamp, waitDuration));
+                emit QueueCheckInQueued(_nameHash, ownerOf[settlement.tokenId], minReq, waitDuration);
+            }
         }
-    }
+
+        // Changelog: 0.0.14 (06/10/2025) - added to Process queued settlements after 3 weeks
+        function processSettlement(uint256 _index) external {
+            require(_index < pendingSettlements.length, "Invalid index");
+            PendingSettlement memory settlement = pendingSettlements[_index];
+            require(block.timestamp >= settlement.queueTime + 3 weeks, "Settlement not ready");
+            MailMarket(mailMarket).settleBid(settlement.nameHash, settlement.bidIndex, settlement.isETH, settlement.token);
+            NameRecord storage record = nameRecords[settlement.nameHash];
+            record.graceEnd = block.timestamp + GRACE_PERIOD; // Reset secondary grace period
+            emit SettlementProcessed(settlement.nameHash, ownerOf[nameHashToTokenId[settlement.nameHash]]);
+
+            // Swap and pop to remove processed settlement
+            pendingSettlements[_index] = pendingSettlements[pendingSettlements.length - 1];
+            pendingSettlements.pop();
+        }
 
     // Changelog: 0.0.13 (05/10/2025) - Added to allow owner to accept bid via MailMarket
     function acceptMarketBid(uint256 _nameHash, bool _isETH, address _token, uint256 _bidIndex) external {
@@ -283,19 +325,32 @@ contract MailNames {
         emit SubnameMinted(parentHash, subnameHash, _subname, msg.sender);
     }
 
-    function _processNextCheckin() private {
-        if (nextProcessIndex >= pendingCheckins.length) return;
-        PendingCheckin memory nextCheck = pendingCheckins[nextProcessIndex];
-        if (block.timestamp < nextCheck.queuedTime + nextCheck.waitDuration) return;
-        uint256 tokenId = nameHashToTokenId[nextCheck.nameHash];
-        require(tokenId != 0 && ownerOf[tokenId] == nextCheck.user, "No longer owner");
-        NameRecord storage record = nameRecords[nextCheck.nameHash];
-        record.allowanceEnd = block.timestamp + ALLOWANCE_PERIOD;
-        record.graceEnd = block.timestamp + ALLOWANCE_PERIOD + GRACE_PERIOD;
-        emit NameCheckedIn(nextCheck.nameHash, nextCheck.user);
-        emit CheckInProcessed(nextCheck.nameHash, nextCheck.user);
-        nextProcessIndex++;
-    }
+       // Changelog: 0.0.16 (06/10/2025) - Added helper to clear pending settlements for a name
+        function _clearPendingSettlements(uint256 _nameHash) private {
+            for (uint256 i = 0; i < pendingSettlements.length; i++) {
+                if (pendingSettlements[i].nameHash == _nameHash) {
+                    pendingSettlements[i] = pendingSettlements[pendingSettlements.length - 1];
+                    pendingSettlements.pop();
+                    i--; // Adjust index after pop
+                }
+            }
+        }
+        
+            // Changelog: 0.0.16 (06/10/2025) - Clears pending settlements on check-in
+        function _processNextCheckin() private {
+            if (nextProcessIndex >= pendingCheckins.length) return;
+            PendingCheckin memory nextCheck = pendingCheckins[nextProcessIndex];
+            if (block.timestamp < nextCheck.queuedTime + nextCheck.waitDuration) return;
+            uint256 tokenId = nameHashToTokenId[nextCheck.nameHash];
+            require(tokenId != 0 && ownerOf[tokenId] == nextCheck.user, "No longer owner");
+            NameRecord storage record = nameRecords[nextCheck.nameHash];
+            record.allowanceEnd = block.timestamp + ALLOWANCE_PERIOD;
+            record.graceEnd = block.timestamp + ALLOWANCE_PERIOD + GRACE_PERIOD;
+            _clearPendingSettlements(nextCheck.nameHash); // Clear pending settlements
+            emit NameCheckedIn(nextCheck.nameHash, nextCheck.user);
+            emit CheckInProcessed(nextCheck.nameHash, nextCheck.user);
+            nextProcessIndex++;
+        }
 
     function advance() external {
         _processNextCheckin();
@@ -353,6 +408,13 @@ contract MailNames {
         emit RecordsUpdated(_parentHash, msg.sender);
     }
 
+        // Changelog: 0.0.15 (06/10/2025) - Returns name string for a given token ID
+        function getNameByTokenId(uint256 _tokenId) external view returns (string memory name) {
+            uint256 nameHash = tokenIdToNameHash[_tokenId];
+            require(nameHash != 0, "Token ID not minted");
+            name = nameRecords[nameHash].name;
+        }
+    
     function getName(string memory _name) external view returns (address _owner) {
         uint256 nameHash = _stringToHash(_name);
         uint256 tokenId = nameHashToTokenId[nameHash];
@@ -360,16 +422,37 @@ contract MailNames {
         return ownerOf[tokenId];
     }
 
-    function getNameRecords(uint256 step, uint256 maxIterations) external view returns (NameRecord[] memory records) {
-        uint256 total = allNameHashes.length;
-        uint256 end = step + maxIterations > total ? total : step + maxIterations;
-        uint256 count = end > step ? end - step : 0;
-        records = new NameRecord[](count);
-        for (uint256 i = 0; i < count; i++) {
-            uint256 nameHash = allNameHashes[step + i];
-            records[i] = nameRecords[nameHash];
+        // Changelog: 0.0.20 (06/10/2025) - Returns single NameRecord for name string
+        function getNameRecords(string memory _name) external view returns (NameRecord memory record) {
+            uint256 nameHash = _stringToHash(_name);
+            require(nameRecords[nameHash].nameHash != 0, "Name not found");
+            record = nameRecords[nameHash];
         }
-    }
+    
+                // Changelog: 0.0.20 (06/10/2025) - Returns PendingSettlement for given index
+        function getSettlementById(uint256 _index) external view returns (PendingSettlement memory settlement) {
+            require(_index < pendingSettlements.length, "Invalid index");
+            settlement = pendingSettlements[_index];
+        }
+        
+                // Changelog: 0.0.19 (06/10/2025) - Uses name string, returns paginated settlements
+        function getPendingSettlements(string memory _name, uint256 _step, uint256 _maxIterations) external view returns (PendingSettlement[] memory settlements) {
+            uint256 nameHash = _stringToHash(_name);
+            uint256 count = 0;
+            for (uint256 i = _step; i < pendingSettlements.length && count < _maxIterations; i++) {
+                if (pendingSettlements[i].nameHash == nameHash) {
+                    count++;
+                }
+            }
+            settlements = new PendingSettlement[](count);
+            uint256 index = 0;
+            for (uint256 i = _step; i < pendingSettlements.length && index < count; i++) {
+                if (pendingSettlements[i].nameHash == nameHash) {
+                    settlements[index] = pendingSettlements[i];
+                    index++;
+                }
+            }
+        }
 
     function getSubnameID(string memory _parentName, string memory _subname) external view returns (uint256 subnameIndex, bool found) {
         uint256 parentHash = _stringToHash(_parentName);
