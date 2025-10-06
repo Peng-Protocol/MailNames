@@ -1,11 +1,31 @@
 # MailNames
 **Version**: 0.0.9  
-**Date**: 05/10/2025  
+**Date**: 06/10/2025  
 **SPDX-License-Identifier**: BSL 1.1 - Peng Protocol 2025  
 **Solidity Version**: ^0.8.2  
 
 ## Overview
-`MailNames` is a decentralized domain name system with ERC721 compatibility, enabling free name minting (tokenId from 0 upward) with a 1-year allowance and 30-day grace period. Owners queue check-ins post-expiration (locks min token in `MailLocker` for 10y; dynamic wait 10min-2w). Bidding handled by `MailMarket` (ETH/ERC20, auto-settle post-grace). Subnames transfer with parents, with custom records (strings <=1024 chars). Names limited to 24 chars. Primary for Chainmail (link unavailable). Ownership via `ownerOf`; transfers inherit allowance. Safe transfers enforce ERC721Receiver hooks.
+`MailNames` is a decentralized domain name system with ERC721 compatibility, enabling free name minting with a 1-year allowance. 
+
+### Renewal 
+Names can only be renewed using "check-ins" and only during the 30-day grace period after their allowance ends. 
+
+- **Check-ins:** A check-in is a 10 year lockup of $MAIL (handled by `MailLocker`) required to renew a name. Check-ins are queued and can take a minimum of 10 minutes or maximum of 2 weeks, the time and amount required depend on the number of active check-ins waiting in queue. 
+
+- **Retention:** Renewal is not strictly required to retain a name, however, after the grace-period; if any active ETH bids exist for the name, the system will settle the name to the highest ETH bidder. In this way only high value names require continuous renewal.
+
+- **Wait Dynamics:** Because the check-in wait time is sandwiched within a one month grace period;
+for valuable names, this forces the user to initiate renewal at any point during the first two weeks of their grace, absorbing any lock-up amount required to retain the name, or losing the name to the highest bidder. 
+
+### Bidding 
+Bids (handled by `MailMarket`) are limited to a maximum of (100) bids per token, bidders are required to hold enough $MAIL to cover the cost of renewing the name. Each new bid in a full array pushes out the lowest bid and ensures that the highest bid has enough $MAIL to cover renewal. 
+
+### Subname and Records
+Users can attach up to (5) "records" to their name, and create subnames in kind. Subnames are transferred with their parent name. Names are limited to (24) characters and records to (1024). 
+
+---
+
+MailNames is the primary name system for Chainmail (link unavailable). 
 
 ## Structs
 - **NameRecord**: Stores domain details.
@@ -283,7 +303,7 @@ Locks `MailToken` deposits from `MailNames` queues (10y unlock, multi-indexed). 
 **Date**: 05/10/2025  
 
 ### Overview
-Handles bidding for `MailNames` (ETH/ERC20, auto-settle post-grace). Supports token bids with fee handling. Owner-set `mailNames`/`mailToken`.
+Handles bidding for `MailNames` (ETH/ERC20, auto-settle post-grace). Supports token bids with tax token handling. Owner-set `mailNames`/`mailToken`.
 
 ### Structs
 - **Bid**: 
@@ -397,14 +417,13 @@ Handles bidding for `MailNames` (ETH/ERC20, auto-settle post-grace). Supports to
 - **_calculateMinRequired(uint256 _queueLen)**: 1 * 2^_queueLen wei.
 
 ### Key Insights
-- **Bidding**: ETH/ERC20 bids; auto-settle post-grace via `MailNames._settleBid`; owner-initiated via `acceptBid` -> `MailNames.acceptMarketBid`.
+- **Bidding**: ETH bids; auto-settle post-grace via `MailNames._settleBid`; owner-initiated via `acceptBid` -> `MailNames.acceptMarketBid`.
 - **Fee Handling**: `TokenTransferData` ensures accurate token amounts.
 - **Gas/DoS**: Fixed 100 bids, sorted descending; paginated views.
 - **Events**: `BidPlaced`/`BidSettled`/`BidClosed`/`TopBidInvalidated`/`OwnershipTransferred`.
 - **Access Control**: `settleBid` restricted to `MailNames`; `acceptMarketBid` ensures owner auth.
 
 ## Notes
-- Deploy `MailLocker`, `MailMarket`, then `MailNames`.
-- Set `mailToken`/`mailLocker`/`mailMarket` post-deploy.
 - No `ReentrancyGuard` needed; no recursive calls.
 - All on-chain; try/catch for ERC721 hooks.
+- If a user creates an automated script to indefinitely renew a name; if the name is valuable enough, other users may crowd out the script by selectively renewing their names during the script's grace period, thereby causing a lock-up price hike and forcing the script to spend all its tokens before its lockup withdrawals can replenish its balance. 
