@@ -1,4 +1,3 @@
-<xaiArtifact artifact_id="mailnames-readme-updated" artifact_version_id="1" title="README.md" contentType="text/markdown">
 # MailNames
 **Version**: 0.0.15  
 **Date**: 06/10/2025  
