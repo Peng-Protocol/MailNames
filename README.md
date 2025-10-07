@@ -1,6 +1,6 @@
 # MailNames
-**Version**: 0.0.15  
-**Date**: 06/10/2025  
+**Version**: 0.0.16  
+**Date**: 07/10/2025  
 **SPDX-License-Identifier**: BSL 1.1 - Peng Protocol 2025  
 **Solidity Version**: ^0.8.2  
 
@@ -443,7 +443,7 @@ Handles bidding for `MailNames` (ETH/ERC20, auto-settle post-grace via queue). S
 
 ### Internal Functions
 - **_stringToHash(string _str)**: Generates keccak256 hash.
-- **_validateBidRequirements(string _name, uint256 _bidAmount)**: Validates name, amount, `mailToken`.
+- **_validateBidRequirements(string _name, uint256 _bidAmount)**: Checks name, amount, $MAIL scaled by active bids.
 - **_handleTokenTransfer(address _token, uint256 _amount)**: Computes received amount for token bids.
 - **_insertAndSort(Bid[100] storage bidsArray, Bid newBid)**: Sorts bids descending by amount, then timestamp.
 - **_removeBidFromArray(Bid[100] storage bidsArray, uint256 _bidIndex)**: Clears bid via shift.

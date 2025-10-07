@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.2 (05/10/2025)
+// File Version: 0.0.3 (07/10/2025)
 // Changelog:
+// - 0.0.3 (07/10): Updated _validateBidRequirements to scale minReq by active bid count
 // - 0.0.2 (05/10): Updated acceptBid to call MailNames.acceptMarketBid; added OwnershipTransferred event
 // - 0.0.1 (05/10): Initial implementation with bidding from MailNames
 
@@ -152,17 +153,26 @@ contract MailMarket {
     }
 
     function _validateBidRequirements(string memory _name, uint256 _bidAmount) private view returns (BidValidation memory validation) {
-        validation.nameHash = _stringToHash(_name);
-        validation.tokenId = MailNames(mailNames).nameHashToTokenId(validation.nameHash);
-        require(validation.tokenId != 0, "Name not minted");
-        require(_bidAmount > 0, "Invalid bid amount");
-        validation.queueLen = 0;
-        validation.minReq = _calculateMinRequired(validation.queueLen);
-        uint8 dec = IERC20(mailToken).decimals();
-        validation.normMin = validation.minReq / (10 ** dec);
-        require(IERC20(mailToken).balanceOf(msg.sender) >= validation.normMin, "Insufficient MAIL");
-        require(_bidAmount >= validation.minReq, "Bid below min lock");
+    validation.nameHash = _stringToHash(_name);
+    validation.tokenId = MailNames(mailNames).nameHashToTokenId(validation.nameHash);
+    require(validation.tokenId != 0, "Name not minted");
+    require(_bidAmount > 0, "Invalid bid amount");
+    validation.queueLen = 0;
+    uint256 activeBids = 0;
+    for (uint256 i = 0; i < MAX_BIDS; i++) {
+        if (ethBids[validation.nameHash][i].bidder != address(0)) activeBids++;
     }
+    for (uint256 i = 0; i < allowedTokens.length; i++) {
+        for (uint256 j = 0; j < MAX_BIDS; j++) {
+            if (tokenBids[validation.nameHash][allowedTokens[i]][j].bidder != address(0)) activeBids++;
+        }
+    }
+    validation.minReq = _calculateMinRequired(validation.queueLen) * (activeBids + 1); // Scale by active bids
+    uint8 dec = IERC20(mailToken).decimals();
+    validation.normMin = validation.minReq / (10 ** dec);
+    require(IERC20(mailToken).balanceOf(msg.sender) >= validation.normMin, "Insufficient MAIL");
+    require(_bidAmount >= validation.minReq, "Bid below min lock");
+}
 
     function _handleTokenTransfer(address _token, uint256 _amount) private returns (uint256 receivedAmount) {
         IERC20 token = IERC20(_token);
