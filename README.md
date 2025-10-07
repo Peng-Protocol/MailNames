@@ -1,5 +1,5 @@
 # MailNames
-**Version**: 0.0.16  
+**Version**: 0.0.17
 **Date**: 07/10/2025  
 **SPDX-License-Identifier**: BSL 1.1 - Peng Protocol 2025  
 **Solidity Version**: ^0.8.2  
@@ -333,11 +333,11 @@ Locks `MailToken` deposits from `MailNames` queues (10y unlock, multi-indexed). 
 - **Degradation**: Reverts on invalid transfer/time.
 
 ## MailMarket
-**Version**: 0.0.2  
-**Date**: 05/10/2025  
+**Version**: 0.0.5  
+**Date**: 07/10/2025  
 
 ### Overview
-Handles bidding for `MailNames` (ETH/ERC20, auto-settle post-grace via queue). Supports token bids with tax token handling. Owner-set `mailNames`/`mailToken`.
+Handles bidding for `MailNames` (ETH/ERC20, auto-settle post-grace via queue). Supports token bids with tax token handling. Owner-set `mailNames`/`mailToken`. Bidders hold $MAIL scaled by their active bids, deterring griefing.
 
 ### Structs
 - **Bid**: 
@@ -364,28 +364,29 @@ Handles bidding for `MailNames` (ETH/ERC20, auto-settle post-grace via queue). S
 - `tokenBids`: Maps `uint256` (nameHash) to `mapping(address => Bid[100])`.
 - `allowedTokens`: Array of allowed ERC20 tokens.
 - `tokenCounts`: Maps `address` to count in `allowedTokens`.
+- `bidderActiveBids`: Maps `address` to `uint256` (bidder’s active bids across all names).
 - `MAX_BIDS`: 100.
 
 ### External Functions and Call Trees
 #### placeETHBid(string _name)
-- **Purpose**: Places ETH bid.
-- **Checks**: Name exists, `msg.value>0`, sufficient `mailToken`.
+- **Purpose**: Places ETH bid, increments `bidderActiveBids`.
+- **Checks**: Name exists, `msg.value>0`, sufficient `mailToken` (scaled by `bidderActiveBids`).
 - **Internal Calls**:
   - `_validateBidRequirements`: Checks name, amount, `mailToken` balance.
-  - `_insertAndSort`: Sorts bids descending.
+  - `_insertAndSort`: Inserts bid with sorted insertion.
 - **Effects**: Stores bid, emits `BidPlaced`.
 
 #### placeTokenBid(string _name, uint256 _amount, address _token)
-- **Purpose**: Places ERC20 bid.
-- **Checks**: Valid token, name, amount, `mailToken` balance.
+- **Purpose**: Places ERC20 bid, increments `bidderActiveBids`.
+- **Checks**: Valid token, name, amount, `mailToken` balance (scaled by `bidderActiveBids`).
 - **Internal Calls**:
   - `_validateBidRequirements`: Validates inputs.
   - `_handleTokenTransfer`: Computes received amount.
-  - `_insertAndSort`: Sorts bids.
+  - `_insertAndSort`: Inserts bid with sorted insertion.
 - **Effects**: Stores bid, emits `BidPlaced`.
 
 #### closeBid(uint256 _nameHash, bool _isETH, address _token, uint256 _bidIndex)
-- **Purpose**: Refunds/removes bid.
+- **Purpose**: Refunds/removes bid, decrements `bidderActiveBids`.
 - **Checks**: Valid index, caller=bidder.
 - **Internal Calls**:
   - `_removeBidFromArray`: Shifts array.
@@ -399,7 +400,7 @@ Handles bidding for `MailNames` (ETH/ERC20, auto-settle post-grace via queue). S
 - **Effects**: Triggers settlement via `MailNames`, emits `BidSettled`.
 
 #### settleBid(uint256 _nameHash, uint256 _bidIndex, bool _isETH, address _token)
-- **Purpose**: Settles bid (called by `MailNames`).
+- **Purpose**: Settles bid (called by `MailNames`), decrements `bidderActiveBids`.
 - **Checks**: Caller=`mailNames`, valid bid.
 - **Internal Calls**:
   - `_transferBidFunds`: Transfers to old owner.
@@ -407,18 +408,25 @@ Handles bidding for `MailNames` (ETH/ERC20, auto-settle post-grace via queue). S
 - **Effects**: Calls `MailNames.transfer`, emits `BidSettled`.
 
 #### checkTopBidder(uint256 _nameHash)
-- **Purpose**: Validates top ETH bid.
-- **Checks**: Sufficient `mailToken` balance.
+- **Purpose**: Validates top ETH bid’s `mailToken` balance; closes invalid bid, refunds, clears data.
+- **Checks**: Sufficient `mailToken` balance against `_calculateMinRequired`.
 - **Internal Calls**:
-  - `_calculateMinRequired`: Minimum wei.
-- **Effects**: Trims invalid bid, emits `TopBidInvalidated`.
+  - `_calculateMinRequired`: Minimum wei (1 * 2^0).
+  - `_removeBidFromArray`: Clears invalid bid.
+- **Effects**: Refunds ETH, decrements `bidderActiveBids`, emits `BidClosed`/`TopBidInvalidated`.
 - **Returns**: (bidder, amount, valid).
 
 #### getNameBids(string _name, bool _isETH, address _token)
-- **Purpose**: Retrieves bids for name.
+- **Purpose**: Retrieves all bids for a name (ETH or ERC20).
 - **Internal Calls**:
-  - `_stringToHash`: Name hash.
+  - `_stringToHash`: Computes name hash.
 - **Returns**: `Bid[100]`.
+
+#### getBidderBids(string _name, address _bidder, bool _isETH, address _token, uint256 _step, uint256 _maxIterations)
+- **Purpose**: Retrieves paginated bid indices for a bidder on a name and token ( `_isETH=true` for ETH, `_isETH=false` ignores `_token` address if ETH).
+- **Internal Calls**:
+  - `_stringToHash`: Computes name hash.
+- **Returns**: `uint256[]` (bid indices).
 
 #### addAllowedToken(address _token) [onlyOwner]
 - **Purpose**: Adds ERC20 token.
@@ -443,17 +451,18 @@ Handles bidding for `MailNames` (ETH/ERC20, auto-settle post-grace via queue). S
 
 ### Internal Functions
 - **_stringToHash(string _str)**: Generates keccak256 hash.
-- **_validateBidRequirements(string _name, uint256 _bidAmount)**: Checks name, amount, $MAIL scaled by active bids.
+- **_validateBidRequirements(string _name, uint256 _bidAmount)**: Checks name, amount, $MAIL scaled by `bidderActiveBids`.
 - **_handleTokenTransfer(address _token, uint256 _amount)**: Computes received amount for token bids.
-- **_insertAndSort(Bid[100] storage bidsArray, Bid newBid)**: Sorts bids descending by amount, then timestamp.
+- **_insertAndSort(Bid[100] storage bidsArray, Bid newBid)**: Inserts bid with sorted insertion for gas efficiency.
 - **_removeBidFromArray(Bid[100] storage bidsArray, uint256 _bidIndex)**: Clears bid via shift.
 - **_transferBidFunds(address _oldOwner, uint256 _amount, bool _isETH, address _token)**: Transfers funds (ETH or token).
 - **_calculateMinRequired(uint256 _queueLen)**: 1 * 2^_queueLen wei.
 
 ### Key Insights
-- **Bidding**: ETH bids; auto-settle post-grace via `MailNames._settleBid` (queued for 3w); owner-initiated via `acceptBid` -> `MailNames.acceptMarketBid`.
+- **Bidding**: ETH/ERC20 bids; auto-settle post-grace via `MailNames._settleBid` (queued for 3w); owner-initiated via `acceptBid` -> `MailNames.acceptMarketBid`.
+- **Griefing Deterrence**: $MAIL requirement scales with `bidderActiveBids`, increasing costs for spamming multiple bids.
 - **Fee Handling**: `TokenTransferData` ensures accurate token amounts.
-- **Gas/DoS**: Fixed 100 bids, sorted descending; paginated views.
+- **Gas/DoS**: Fixed 100 bids; optimized `_insertAndSort` with sorted insertion; paginated views (`getNameBids`, `getBidderBids`).
 - **Events**: `BidPlaced`/`BidSettled`/`BidClosed`/`TopBidInvalidated`/`OwnershipTransferred`.
 - **Access Control**: `settleBid` restricted to `MailNames`; `acceptMarketBid` ensures owner auth.
 
