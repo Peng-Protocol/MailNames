@@ -1,11 +1,11 @@
 # MailNames
-**Version**: 0.0.17
-**Date**: 07/10/2025  
+**Version**: 0.0.21
+**Date**: 07/11/2025  
 **SPDX-License-Identifier**: BSL 1.1 - Peng Protocol 2025  
 **Solidity Version**: ^0.8.2  
 
 ## Overview
-`MailNames` is a decentralized domain name system with ERC721 compatibility, enabling free name minting with a 1-year allowance. 
+`MailNames` is a decentralized domain name system with ERC721 compatibility, enabling free name minting with a 1-year allowance. Time-sensitive logic now uses `_now()` for VM testing via `warp()`/`unWarp()`.
 
 ### Renewal 
 Names can only be renewed using "check-ins" during a 7-day grace period after the name's allowance ends.
@@ -43,14 +43,14 @@ MailNames is the primary name system for Chainmail (link unavailable).
 - **PendingCheckin**: Stores queued checkin details.
   - `nameHash`: Name to check in.
   - `user`: Owner address.
-  - `queuedTime`: Block timestamp at queue.
+  - `queuedTime`: Timestamp at queue (via `_now()`).
   - `waitDuration`: Wait (10min + 6h*queueLen, cap 2w).
 - **PendingSettlement**: Stores queued settlement details.
   - `nameHash`: Name to settle.
   - `bidIndex`: Bid index in `MailMarket`.
   - `isETH`: True if ETH bid.
   - `token`: Token address (if ERC20).
-  - `queueTime`: Block timestamp at queue.
+  - `queueTime`: Timestamp at queue (via `_now()`).
 - **CustomRecord**: Stores metadata (strings <=1024 chars).
   - `text`: General text (e.g., description).
   - `resolver`: Resolver info.
@@ -83,6 +83,8 @@ MailNames is the primary name system for Chainmail (link unavailable).
 - `mailToken`: address (ERC20 token).
 - `mailLocker`: address (MailLocker contract).
 - `mailMarket`: address (MailMarket contract).
+- `currentTime`: uint256 (warp state).
+- `isWarped`: bool (warp flag).
 - `ALLOWANCE_PERIOD`: 365 days.
 - `GRACE_PERIOD`: 7 days.
 - `MAX_NAME_LENGTH`: 24.
@@ -95,23 +97,24 @@ MailNames is the primary name system for Chainmail (link unavailable).
 - **Internal Calls**:
   - `_stringToHash`: Generates nameHash.
   - `_validateName`: Validates format/length.
+  - `_now()`: Sets `allowanceEnd`/`graceEnd`.
 - **Effects**: Sets `NameRecord`, maps `tokenIdToNameHash`/`nameHashToTokenId`/`ownerOf`/`_balances`, pushes to `allNameHashes`, emits `NameMinted`/`Transfer`.
 
 ### queueCheckIn(uint256 _nameHash)
 - **Purpose**: Queues checkin post-expiration (locks token in `MailLocker` for 10y).
-- **Checks**: Caller=owner, expired, transfer succeeds.
+- **Checks**: Caller=owner, `_now()` > allowanceEnd, transfer succeeds.
 - **Internal Calls**:
   - `_processQueueRequirements`: Locks tokens via `MailLocker.depositLock`.
   - `_calculateMinRequired`: 1 * 2^queueLen wei.
   - `_calculateWaitDuration`: 10min + 6h*queueLen, cap 2w.
   - `this.advance`: Processes if ready.
-- **Effects**: Pushes `PendingCheckin`, emits `QueueCheckInQueued`.
+- **Effects**: Pushes `PendingCheckin` with `queuedTime = _now()`, emits `QueueCheckInQueued`.
 
 ### advance()
 - **Purpose**: Processes one ready checkin.
-- **Checks**: Time/user eligibility.
+- **Checks**: Time/user eligibility via `_now()`.
 - **Internal Calls**:
-  - `_processNextCheckin`: Updates `allowanceEnd`, clears `pendingSettlements`, emits `NameCheckedIn`/`CheckInProcessed`.
+  - `_processNextCheckin`: Checks `queuedTime + waitDuration <= _now()`, updates `allowanceEnd`, clears `pendingSettlements`, emits `NameCheckedIn`/`CheckInProcessed`.
 - **Effects**: Increments `nextProcessIndex`.
 
 ### transferName(uint256 _nameHash, address _newOwner)
@@ -172,6 +175,14 @@ MailNames is the primary name system for Chainmail (link unavailable).
   - `_validateName`: Subname format.
 - **Effects**: Pushes `SubnameRecord`, emits `SubnameMinted`.
 
+### warp(uint256 newTimestamp) [onlyOwner]
+- **Purpose**: Sets `currentTime`, enables warp.
+- **Effects**: `currentTime = newTimestamp`, `isWarped = true`.
+
+### unWarp() [onlyOwner]
+- **Purpose**: Disables warp.
+- **Effects**: `isWarped = false`.
+
 ### setMailToken(address _mailToken) [onlyOwner]
 - **Purpose**: Sets ERC20 token.
 - **Effects**: Updates `mailToken`.
@@ -191,107 +202,44 @@ MailNames is the primary name system for Chainmail (link unavailable).
 
 ### acceptMarketBid(uint256 _nameHash, bool _isETH, address _token, uint256 _bidIndex)
 - **Purpose**: Allows owner to accept bid via `MailMarket`.
-- **Checks**: Caller=owner, within allowance, valid tokenId.
+- **Checks**: Caller=owner, `_now()` <= allowanceEnd, valid tokenId.
 - **Internal Calls**:
   - `_settleBid`: Queues or settles via `MailMarket.settleBid`.
-- **Effects**: Triggers settlement, emits `BidSettled` via `MailMarket`.
+- **Effects**: Immediate settlement if within allowance.
 
-### processSettlement(uint256 _index)
-- **Purpose**: Processes queued settlement after 3 weeks.
-- **Checks**: Valid index, time elapsed.
+### processSettlement() [external]
+- **Purpose**: Processes one queued settlement after 3 weeks.
+- **Checks**: `queueTime + 3 weeks <= _now()`.
 - **Internal Calls**:
-  - `MailMarket.settleBid`: Executes settlement.
-- **Effects**: Resets `graceEnd`, swaps/pops queue, emits `SettlementProcessed`.
+  - `MailMarket.settleBid`: Executes transfer.
+  - `_clearPendingSettlements`: Removes processed entries.
+- **Effects**: Emits `SettlementProcessed`.
 
-### getName(string _name)
-- **Purpose**: Resolves name to owner.
-- **Internal Calls**:
-  - `_stringToHash`: Name hash.
-- **Returns**: address (`ownerOf`).
-
-### getNameRecords(string _name)
-- **Purpose**: Resolves name to NameRecord.
-- **Internal Calls**:
-  - `_stringToHash`: Name hash.
-- **Returns**: `NameRecord` (single record).
-
-### getSettlementById(uint256 _index)
-- **Purpose**: Returns PendingSettlement for given index.
-- **Checks**: Valid index.
-- **Returns**: `PendingSettlement` (single struct).
-
-### getPendingSettlements(string _name, uint256 _step, uint256 _maxIterations)
-- **Purpose**: Paginated pending settlements for a name.
-- **Internal Calls**:
-  - `_stringToHash`: Name hash.
-- **Returns**: `PendingSettlement[]`.
-
-### getNameByTokenId(uint256 _tokenId)
-- **Purpose**: Resolves tokenId to name string.
-- **Checks**: Token minted.
-- **Returns**: string (`nameRecords[nameHash].name`).
-
-### getSubnameID(string _parentName, string _subname)
-- **Purpose**: Finds subname index.
-- **Internal Calls**:
-  - `_stringToHash`: Hashes.
-- **Returns**: (index, found).
-
-### getSubRecords(string _parentName, string _subname)
-- **Purpose**: Retrieves subname records.
-- **Internal Calls**:
-  - `_stringToHash`, `this.getSubnameID`.
-- **Returns**: `CustomRecord[5]`.
-
-### getSubnames(string _parentName, uint256 step, uint256 _maxIterations)
-- **Purpose**: Paginated subname strings.
-- **Internal Calls**:
-  - `_stringToHash`.
-- **Returns**: `string[]`.
-
-## Internal Functions
-- **_stringToHash(string _str)**: Generates keccak256 hash for storage/retrieval.
-- **_validateName(string _name)**: Ensures length <=24, no spaces, >0.
-- **_validateRecord(CustomRecord _record)**: Checks string lengths <=1024.
-- **_transfer(uint256 _tokenId, address _to)**: Updates `ownerOf`/`_balances`, emits `Transfer`.
-- **_isContract(address _account)**: Assembly check for contract detection.
-- **_checkOnERC721Received(address _to, address _from, uint256 _tokenId, bytes _data)**: Invokes receiver hook with try/catch.
-- **_calculateMinRequired(uint256 _queueLen)**: 1 * 2^_queueLen wei for checkin cost.
-- **_calculateWaitDuration(uint256 _queueLen)**: 10min + 6h*_queueLen, cap 2w.
-- **_processNextCheckin()**: Updates `allowanceEnd`, clears `pendingSettlements`, emits `NameCheckedIn`/`CheckInProcessed`.
-- **_processQueueRequirements()**: Locks tokens via `MailLocker.depositLock`.
-- **_settleBid(uint256 _nameHash, uint256 _bidIndex, bool _isETH, address _token)**: Queues settlement if post-grace (3w delay), immediate otherwise; handles checkin queueing.
-- **_clearPendingSettlements(uint256 _nameHash)**: Removes all pending settlements for a name on renewal.
-
-## Key Insights
-- **ERC721 Integration**: `tokenId` enables standard transfers; `_balances` O(1); `nameHashToTokenId` speeds auth.
-- **Queue Mechanics**: Locks via `MailLocker`; `advance` O(1); transfers don’t cancel queue; post-grace settlements queued for 3 weeks, cleared on renewal via `_clearPendingSettlements`.
-- **Bidding**: `MailMarket` handles ETH/ERC20 bids; `acceptMarketBid` enables owner-initiated settlements within allowance; `processSettlement` for post-grace.
-- **Settlement Management**: `pendingSettlements` uses swap-and-pop for removals (`processSettlement`, `_clearPendingSettlements`), preventing gaps; only one settlement finalizes per name.
-- **Fee Handling**: Handled in `MailMarket` via `TokenTransferData`.
-- **Gas/DoS**: Paginated views (`getPendingSettlements`, `getSubnames`), O(1) queue processing, swap-pop for settlements/checkins, assembly for `_isContract`.
-- **Ownership**: Unified via `ownerOf`; `acceptMarketBid` ensures owner auth.
+**Ownership**: Unified via `ownerOf`; `acceptMarketBid` ensures owner auth.
 - **Grace/Queue**: 7-day primary grace; post-grace bids queue for 3 weeks; renewals clear settlements, preserving bids for later acceptance.
+- **Time Logic**: All timestamps use `_now()` → `isWarped ? currentTime : block.timestamp`.
 - **Events**: ERC721 (`Transfer`/`Approval`/`ApprovalForAll`) and custom (`SettlementProcessed`); no emits in views.
 - **Degradation**: Reverts on critical failures; try/catch for hooks; `advance`/`processSettlement` skip gracefully.
 
 ## MailLocker
-**Version**: 0.0.1  
-**Date**: 05/10/2025  
+**Version**: 0.0.2  
+**Date**: 07/11/2025  
 
 ### Overview
-Locks `MailToken` deposits from `MailNames` queues (10y unlock, multi-indexed). Owner-set post-deploy; handles normalized amounts.
+Locks `MailToken` deposits from `MailNames` queues (10y unlock, multi-indexed). Owner-set post-deploy; handles normalized amounts. Time warp added.
 
 ### Structs
 - **Deposit**: 
   - `amount`: Normalized (no decimals).
-  - `unlockTime`: Timestamp.
+  - `unlockTime`: Timestamp (set externally).
 
 ### State Variables
 - `owner`: Contract owner.
 - `mailToken`: IERC20 token.
 - `mailNames`: `MailNames` address.
 - `userDeposits`: Maps `address` to `Deposit[]`.
+- `currentTime`: uint256 (warp state).
+- `isWarped`: bool (warp flag).
 
 ### External Functions and Call Trees
 #### depositLock(uint256 _normalizedAmount, address _user, uint256 _unlockTime) [only MailNames]
@@ -301,8 +249,18 @@ Locks `MailToken` deposits from `MailNames` queues (10y unlock, multi-indexed). 
 
 #### withdraw(uint256 _index)
 - **Purpose**: Withdraws deposit (swap-pop).
-- **Checks**: Valid index, time >= unlock.
+- **Checks**: Valid index, `_now()` >= unlockTime.
+- **Internal Calls**:
+  - `_now()`: Time check.
 - **Effects**: Transfers, emits `DepositWithdrawn`.
+
+#### warp(uint256 newTimestamp) [onlyOwner]
+- **Purpose**: Sets `currentTime`, enables warp.
+- **Effects**: `currentTime = newTimestamp`, `isWarped = true`.
+
+#### unWarp() [onlyOwner]
+- **Purpose**: Disables warp.
+- **Effects**: `isWarped = false`.
 
 #### setMailToken(address _mailToken) [onlyOwner]
 - **Purpose**: Sets token.
@@ -328,22 +286,23 @@ Locks `MailToken` deposits from `MailNames` queues (10y unlock, multi-indexed). 
 ### Key Insights
 - **Multi-Deposits**: Separate 10y locks per user; withdraw by index.
 - **Normalization**: Stores sans decimals; transfers use decimals.
+- **Time Checks**: `withdraw` uses `_now()` for unlock.
 - **Gas/DoS**: Swap-pop on withdraw, paginated views.
 - **Events**: `DepositLocked`/`Withdrawn`.
 - **Degradation**: Reverts on invalid transfer/time.
 
 ## MailMarket
-**Version**: 0.0.5  
-**Date**: 07/10/2025  
+**Version**: 0.0.7  
+**Date**: 07/11/2025  
 
 ### Overview
-Handles bidding for `MailNames` (ETH/ERC20, auto-settle post-grace via queue). Supports token bids with tax token handling. Owner-set `mailNames`/`mailToken`. Bidders hold $MAIL scaled by their active bids, deterring griefing.
+Handles bidding for `MailNames` (ETH/ERC20, auto-settle post-grace via queue). Supports token bids with tax token handling. Owner-set `mailNames`/`mailToken`. Bidders hold $MAIL scaled by their active bids, deterring griefing. Time warp added.
 
 ### Structs
 - **Bid**: 
   - `bidder`: Bidder address.
   - `amount`: Bid amount (post-fee for tokens).
-  - `timestamp`: Bid time.
+  - `timestamp`: Bid time (via `_now()`).
 - **BidValidation**: 
   - `nameHash`: Name hash.
   - `tokenId`: ERC721 token ID.
@@ -365,6 +324,8 @@ Handles bidding for `MailNames` (ETH/ERC20, auto-settle post-grace via queue). S
 - `allowedTokens`: Array of allowed ERC20 tokens.
 - `tokenCounts`: Maps `address` to count in `allowedTokens`.
 - `bidderActiveBids`: Maps `address` to `uint256` (bidder’s active bids across all names).
+- `currentTime`: uint256 (warp state).
+- `isWarped`: bool (warp flag).
 - `MAX_BIDS`: 100.
 
 ### External Functions and Call Trees
@@ -374,6 +335,7 @@ Handles bidding for `MailNames` (ETH/ERC20, auto-settle post-grace via queue). S
 - **Internal Calls**:
   - `_validateBidRequirements`: Checks name, amount, `mailToken` balance.
   - `_insertAndSort`: Inserts bid with sorted insertion.
+  - `_now()`: Sets `timestamp`.
 - **Effects**: Stores bid, emits `BidPlaced`.
 
 #### placeTokenBid(string _name, uint256 _amount, address _token)
@@ -383,6 +345,7 @@ Handles bidding for `MailNames` (ETH/ERC20, auto-settle post-grace via queue). S
   - `_validateBidRequirements`: Validates inputs.
   - `_handleTokenTransfer`: Computes received amount.
   - `_insertAndSort`: Inserts bid with sorted insertion.
+  - `_now()`: Sets `timestamp`.
 - **Effects**: Stores bid, emits `BidPlaced`.
 
 #### closeBid(uint256 _nameHash, bool _isETH, address _token, uint256 _bidIndex)
@@ -415,6 +378,14 @@ Handles bidding for `MailNames` (ETH/ERC20, auto-settle post-grace via queue). S
   - `_removeBidFromArray`: Clears invalid bid.
 - **Effects**: Refunds ETH, decrements `bidderActiveBids`, emits `BidClosed`/`TopBidInvalidated`.
 - **Returns**: (bidder, amount, valid).
+
+#### warp(uint256 newTimestamp) [onlyOwner]
+- **Purpose**: Sets `currentTime`, enables warp.
+- **Effects**: `currentTime = newTimestamp`, `isWarped = true`.
+
+#### unWarp() [onlyOwner]
+- **Purpose**: Disables warp.
+- **Effects**: `isWarped = false`.
 
 #### getNameBids(string _name, bool _isETH, address _token)
 - **Purpose**: Retrieves all bids for a name (ETH or ERC20).
@@ -457,11 +428,13 @@ Handles bidding for `MailNames` (ETH/ERC20, auto-settle post-grace via queue). S
 - **_removeBidFromArray(Bid[100] storage bidsArray, uint256 _bidIndex)**: Clears bid via shift.
 - **_transferBidFunds(address _oldOwner, uint256 _amount, bool _isETH, address _token)**: Transfers funds (ETH or token).
 - **_calculateMinRequired(uint256 _queueLen)**: 1 * 2^_queueLen wei.
+- **_now()**: Returns `isWarped ? currentTime : block.timestamp`.
 
 ### Key Insights
 - **Bidding**: ETH/ERC20 bids; auto-settle post-grace via `MailNames._settleBid` (queued for 3w); owner-initiated via `acceptBid` -> `MailNames.acceptMarketBid`.
 - **Griefing Deterrence**: $MAIL requirement scales with `bidderActiveBids`, increasing costs for spamming multiple bids.
 - **Fee Handling**: `TokenTransferData` ensures accurate token amounts.
+- **Time Logic**: Bid timestamps use `_now()`.
 - **Gas/DoS**: Fixed 100 bids; optimized `_insertAndSort` with sorted insertion; paginated views (`getNameBids`, `getBidderBids`).
 - **Events**: `BidPlaced`/`BidSettled`/`BidClosed`/`TopBidInvalidated`/`OwnershipTransferred`.
 - **Access Control**: `settleBid` restricted to `MailNames`; `acceptMarketBid` ensures owner auth.
@@ -470,3 +443,4 @@ Handles bidding for `MailNames` (ETH/ERC20, auto-settle post-grace via queue). S
 - No `ReentrancyGuard` needed; no recursive calls.
 - All on-chain; try/catch for ERC721 hooks.
 - Automated renewal scripts can be outbid by users renewing during the script’s grace period, increasing lock-up costs and depleting script tokens before withdrawals.
+- **Time Warping**: Unified across `MailNames`, `MailLocker`, `MailMarket` for testing.

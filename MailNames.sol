@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.20 (06/10/2025)
+// File Version: 0.0.21 (07/11/2025)
 // Changelog:
+// - 07/11/2025: Added time-warp system (currentTime, isWarped, warp(), unWarp(), _now()) to MailNames, IMailLocker, IMailMarket for VM testing consistency with TrustlessFund
 // - 0.0.20 (06/10): Updated getNameRecords to return single record; added getSettlementById
 // - 0.0.19 (06/10): Updated getNameRecords, getPendingSettlements to use name string
 // - 0.0.18 (06/10): Added getPendingSettlements for paginated view
@@ -10,14 +11,14 @@ pragma solidity ^0.8.2;
 // - 0.0.16 (06/10): Changed GRACE_PERIOD to 7 days; updated _processNextCheckin to clear pendingSettlements on renewal
 // - 0.0.15 (06/10): Added getNameByTokenId to retrieve name string by token ID
 // - 0.0.14 (06/10): Added PendingSettlement struct, processSettlement; updated _settleBid to queue post-grace settlements
-// - 0.0.13 (05/10): Added acceptMarketBid to call MailMarket.settleBid for owner-initiated bid acceptance
+// - 0.0.13 (05/10): Added acceptMarketBid to call IMailMarket.settleBid for owner-initiated bid acceptance
 // - 0.0.12 (05/10): Removed bidding, added mailMarket/setter, updated _settleBid, removed _nameHash from _processQueueRequirements
 // - 0.0.11 (05/10): Added SettlementData, _removeBidFromArray, _transferBidFunds, _handlePostGraceSettlement, refactored _settleBid
 // - 0.0.10 (05/10): Added TokenTransferData, BidValidation, helpers, refactored queueCheckIn
 // - 0.0.9 (05/10): Restructured bidding, added graceEnd
 // - 0.0.8 (05/10): Renewable names post-allowanceEnd
 // - 0.0.7 (05/10): Added transferOwnership
-// - 0.0.6 (05/10): Added checkin queue, MailLocker integration
+// - 0.0.6 (05/10): Added checkin queue, IMailLocker integration
 // - 0.0.5 (05/10): Implemented safeTransferFrom
 // - 0.0.4 (04/10): Fixed ownership, added enumerable views
 // - 0.0.3 (04/10): Added ERC721 compatibility
@@ -35,11 +36,11 @@ interface IERC721Receiver {
     function onERC721Received(address operator, address from, uint256 tokenId, bytes calldata data) external returns (bytes4);
 }
 
-interface MailLocker {
+interface IMailLocker {
     function depositLock(uint256 amount, address user, uint256 unlockTime) external;
 }
 
-interface MailMarket {
+interface IMailMarket {
     function settleBid(uint256 _nameHash, uint256 _bidIndex, bool _isETH, address _token) external;
 }
 
@@ -114,6 +115,8 @@ contract MailNames {
     address public mailLocker;
     address public mailMarket;
     
+    uint256 public currentTime;
+    bool public isWarped;
             // New (0.0.14) array to store pending settlements
         PendingSettlement[] public pendingSettlements;
 
@@ -142,6 +145,19 @@ contract MailNames {
         require(msg.sender == owner, "Not owner");
         _;
     }
+    
+function warp(uint256 newTimestamp) external onlyOwner {
+    currentTime = newTimestamp;
+    isWarped = true;
+}
+
+function unWarp() external onlyOwner {
+    isWarped = false;
+}
+
+function _now() internal view returns (uint256) {
+    return isWarped ? currentTime : block.timestamp;
+}
 
     function transferOwnership(address _newOwner) external onlyOwner {
         require(_newOwner != address(0), "Invalid owner");
@@ -226,7 +242,7 @@ contract MailNames {
         IERC20(mailToken).transferFrom(msg.sender, address(this), minRequired);
         uint8 decimals = IERC20(mailToken).decimals();
         uint256 normalized = minRequired / (10 ** decimals);
-        MailLocker(mailLocker).depositLock(normalized, msg.sender, block.timestamp + 365 days * 10);
+        IMailLocker(mailLocker).depositLock(normalized, msg.sender, _now() + 365 days * 10);
     }
 
          // Changelog: 0.0.17 (06/10/2025) - Queues post-grace settlements, handles checkin
@@ -235,17 +251,17 @@ contract MailNames {
             settlement.nameHash = _nameHash;
             settlement.tokenId = nameHashToTokenId[_nameHash];
             settlement.oldOwner = ownerOf[settlement.tokenId];
-            settlement.postGrace = block.timestamp > nameRecords[_nameHash].graceEnd;
+            settlement.postGrace = _now() > nameRecords[_nameHash].graceEnd;
 
             if (settlement.postGrace) {
-                pendingSettlements.push(PendingSettlement(_nameHash, _bidIndex, _isETH, _token, block.timestamp));
+                pendingSettlements.push(PendingSettlement(_nameHash, _bidIndex, _isETH, _token, _now()));
             } else {
-                MailMarket(mailMarket).settleBid(_nameHash, _bidIndex, _isETH, _token);
+                IMailMarket(mailMarket).settleBid(_nameHash, _bidIndex, _isETH, _token);
             }
 
             if (settlement.postGrace) {
                 NameRecord storage record = nameRecords[_nameHash];
-                record.graceEnd = block.timestamp + GRACE_PERIOD;
+                record.graceEnd = _now() + GRACE_PERIOD;
                 emit GraceReset(_nameHash, ownerOf[settlement.tokenId]);
                 uint256 queueLen = pendingCheckins.length - nextProcessIndex;
                 uint256 minReq = _calculateMinRequired(queueLen);
@@ -253,9 +269,9 @@ contract MailNames {
                 uint256 normMin = minReq / (10 ** dec);
                 require(IERC20(mailToken).balanceOf(ownerOf[settlement.tokenId]) >= normMin, "New owner insufficient MAIL");
                 IERC20(mailToken).transferFrom(ownerOf[settlement.tokenId], address(this), minReq);
-                MailLocker(mailLocker).depositLock(normMin, ownerOf[settlement.tokenId], block.timestamp + 365 days * 10);
+                IMailLocker(mailLocker).depositLock(normMin, ownerOf[settlement.tokenId], _now() + 365 days * 10);
                 uint256 waitDuration = _calculateWaitDuration(queueLen);
-                pendingCheckins.push(PendingCheckin(_nameHash, ownerOf[settlement.tokenId], block.timestamp, waitDuration));
+                pendingCheckins.push(PendingCheckin(_nameHash, ownerOf[settlement.tokenId], _now(), waitDuration));
                 emit QueueCheckInQueued(_nameHash, ownerOf[settlement.tokenId], minReq, waitDuration);
             }
         }
@@ -264,10 +280,10 @@ contract MailNames {
         function processSettlement(uint256 _index) external {
             require(_index < pendingSettlements.length, "Invalid index");
             PendingSettlement memory settlement = pendingSettlements[_index];
-            require(block.timestamp >= settlement.queueTime + 3 weeks, "Settlement not ready");
-            MailMarket(mailMarket).settleBid(settlement.nameHash, settlement.bidIndex, settlement.isETH, settlement.token);
+            require(_now() >= settlement.queueTime + 3 weeks, "Settlement not ready");
+            IMailMarket(mailMarket).settleBid(settlement.nameHash, settlement.bidIndex, settlement.isETH, settlement.token);
             NameRecord storage record = nameRecords[settlement.nameHash];
-            record.graceEnd = block.timestamp + GRACE_PERIOD; // Reset secondary grace period
+            record.graceEnd = _now() + GRACE_PERIOD; // Reset secondary grace period
             emit SettlementProcessed(settlement.nameHash, ownerOf[nameHashToTokenId[settlement.nameHash]]);
 
             // Swap and pop to remove processed settlement
@@ -275,12 +291,12 @@ contract MailNames {
             pendingSettlements.pop();
         }
 
-    // Changelog: 0.0.13 (05/10/2025) - Added to allow owner to accept bid via MailMarket
+    // Changelog: 0.0.13 (05/10/2025) - Added to allow owner to accept bid via IMailMarket
     function acceptMarketBid(uint256 _nameHash, bool _isETH, address _token, uint256 _bidIndex) external {
         uint256 tokenId = nameHashToTokenId[_nameHash];
         require(tokenId != 0 && ownerOf[tokenId] == msg.sender, "Not owner");
         NameRecord storage record = nameRecords[_nameHash];
-        require(block.timestamp <= record.allowanceEnd, "Allowance expired");
+        require(_now() <= record.allowanceEnd, "Allowance expired");
         _settleBid(_nameHash, _bidIndex, _isETH, _token);
     }
 
@@ -293,8 +309,8 @@ contract MailNames {
         record.name = _name;
         record.nameHash = nameHash;
         record.tokenId = tokenId;
-        record.allowanceEnd = block.timestamp + ALLOWANCE_PERIOD;
-        record.graceEnd = block.timestamp + ALLOWANCE_PERIOD + GRACE_PERIOD;
+        record.allowanceEnd = _now() + ALLOWANCE_PERIOD;
+        record.graceEnd = _now() + ALLOWANCE_PERIOD + GRACE_PERIOD;
         for (uint256 i = 0; i < 5; i++) {
             record.customRecords[i] = CustomRecord("", "", "", 0, address(0));
         }
@@ -340,12 +356,12 @@ contract MailNames {
         function _processNextCheckin() private {
             if (nextProcessIndex >= pendingCheckins.length) return;
             PendingCheckin memory nextCheck = pendingCheckins[nextProcessIndex];
-            if (block.timestamp < nextCheck.queuedTime + nextCheck.waitDuration) return;
+            if (_now() < nextCheck.queuedTime + nextCheck.waitDuration) return;
             uint256 tokenId = nameHashToTokenId[nextCheck.nameHash];
             require(tokenId != 0 && ownerOf[tokenId] == nextCheck.user, "No longer owner");
             NameRecord storage record = nameRecords[nextCheck.nameHash];
-            record.allowanceEnd = block.timestamp + ALLOWANCE_PERIOD;
-            record.graceEnd = block.timestamp + ALLOWANCE_PERIOD + GRACE_PERIOD;
+            record.allowanceEnd = _now() + ALLOWANCE_PERIOD;
+            record.graceEnd = _now() + ALLOWANCE_PERIOD + GRACE_PERIOD;
             _clearPendingSettlements(nextCheck.nameHash); // Clear pending settlements
             emit NameCheckedIn(nextCheck.nameHash, nextCheck.user);
             emit CheckInProcessed(nextCheck.nameHash, nextCheck.user);
@@ -360,10 +376,10 @@ contract MailNames {
         uint256 tokenId = nameHashToTokenId[_nameHash];
         require(tokenId != 0 && ownerOf[tokenId] == msg.sender, "Not owner");
         NameRecord storage record = nameRecords[_nameHash];
-        require(block.timestamp > record.allowanceEnd, "Not expired");
+        require(_now() > record.allowanceEnd, "Not expired");
         (uint256 queueLen, uint256 minRequired) = _processQueueRequirements();
         uint256 waitDuration = _calculateWaitDuration(queueLen);
-        pendingCheckins.push(PendingCheckin(_nameHash, msg.sender, block.timestamp, waitDuration));
+        pendingCheckins.push(PendingCheckin(_nameHash, msg.sender, _now(), waitDuration));
         emit QueueCheckInQueued(_nameHash, msg.sender, minRequired, waitDuration);
         this.advance();
     }

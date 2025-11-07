@@ -1,23 +1,24 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.6 (07/10/2025)
+// File Version: 0.0.07 (07/11/2025)
 // Changelog:
+// - 07/11/2025: Added time-warp system (currentTime, isWarped, warp(), unWarp(), _now()) to IMailNames, MailLocker, MailMarket for VM testing consistency with TrustlessFund
 // - 0.0.6 (07/10): Updated checkTopBidder to close invalid top bid, refund, and clear data
 // - 0.0.5 (07/10): Added getBidderBids to view bidder’s bid indices per token
 // - 0.0.4 (07/10): Added bidderActiveBids; scaled minReq by user bids; optimized _insertAndSort
 // - 0.0.3 (07/10): Updated _validateBidRequirements to scale minReq by active bid count
-// - 0.0.2 (05/10): Updated acceptBid to call MailNames.acceptMarketBid; added OwnershipTransferred event
-// - 0.0.1 (05/10): Initial implementation with bidding from MailNames
+// - 0.0.2 (05/10): Updated acceptBid to call IMailNames.acceptMarketBid; added OwnershipTransferred event
+// - 0.0.1 (05/10): Initial implementation with bidding from IMailNames
 
-interface IERC20 {
+interface IIERC20 {
     function decimals() external view returns (uint8);
     function balanceOf(address account) external view returns (uint256);
     function transfer(address to, uint256 amount) external returns (bool);
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
 }
 
-interface MailNames {
+interface IMailNames {
     function ownerOf(uint256 tokenId) external view returns (address);
     function nameHashToTokenId(uint256 nameHash) external view returns (uint256);
     function transfer(uint256 tokenId, address to) external;
@@ -56,6 +57,9 @@ contract MailMarket {
     uint256 public constant MAX_BIDS = 100;
     
     mapping(address => uint256) public bidderActiveBids;
+    
+    uint256 public currentTime;
+    bool public isWarped;
 
     event BidPlaced(uint256 indexed nameHash, address bidder, uint256 amount, bool isETH);
     event BidSettled(uint256 indexed nameHash, address newOwner, uint256 amount, bool isETH);
@@ -73,6 +77,19 @@ contract MailMarket {
         require(msg.sender == owner, "Not owner");
         _;
     }
+    
+    function warp(uint256 newTimestamp) external onlyOwner {
+    currentTime = newTimestamp;
+    isWarped = true;
+}
+
+function unWarp() external onlyOwner {
+    isWarped = false;
+}
+
+function _now() internal view returns (uint256) {
+    return isWarped ? currentTime : block.timestamp;
+}
 
     function transferOwnership(address _newOwner) external onlyOwner {
         require(_newOwner != address(0), "Invalid owner");
@@ -155,25 +172,25 @@ contract MailMarket {
         if (_isETH) {
             payable(_oldOwner).transfer(_amount);
         } else {
-            IERC20(_token).transfer(_oldOwner, _amount * (10 ** IERC20(_token).decimals()));
+            IIERC20(_token).transfer(_oldOwner, _amount * (10 ** IIERC20(_token).decimals()));
         }
     }
 
     function _validateBidRequirements(string memory _name, uint256 _bidAmount) private view returns (BidValidation memory validation) {
     validation.nameHash = _stringToHash(_name);
-    validation.tokenId = MailNames(mailNames).nameHashToTokenId(validation.nameHash);
+    validation.tokenId = IMailNames(mailNames).nameHashToTokenId(validation.nameHash);
     require(validation.tokenId != 0, "Name not minted");
     require(_bidAmount > 0, "Invalid bid amount");
     validation.queueLen = 0;
     validation.minReq = _calculateMinRequired(validation.queueLen) * (bidderActiveBids[msg.sender] + 1); // Scale by user's bids
-    uint8 dec = IERC20(mailToken).decimals();
+    uint8 dec = IIERC20(mailToken).decimals();
     validation.normMin = validation.minReq / (10 ** dec);
-    require(IERC20(mailToken).balanceOf(msg.sender) >= validation.normMin, "Insufficient MAIL");
+    require(IIERC20(mailToken).balanceOf(msg.sender) >= validation.normMin, "Insufficient MAIL");
     require(_bidAmount >= validation.minReq, "Bid below min lock");
 }
 
     function _handleTokenTransfer(address _token, uint256 _amount) private returns (uint256 receivedAmount) {
-        IERC20 token = IERC20(_token);
+        IIERC20 token = IIERC20(_token);
         uint8 tdec = token.decimals();
         TokenTransferData memory data;
         data.transferAmount = _amount * (10 ** tdec);
@@ -186,11 +203,11 @@ contract MailMarket {
     }
 
     function settleBid(uint256 _nameHash, uint256 _bidIndex, bool _isETH, address _token) external {
-    require(msg.sender == mailNames, "Only MailNames");
+    require(msg.sender == mailNames, "Only IMailNames");
     Bid memory bid = _isETH ? ethBids[_nameHash][_bidIndex] : tokenBids[_nameHash][_token][_bidIndex];
-    address oldOwner = MailNames(mailNames).ownerOf(MailNames(mailNames).nameHashToTokenId(_nameHash));
+    address oldOwner = IMailNames(mailNames).ownerOf(IMailNames(mailNames).nameHashToTokenId(_nameHash));
     _transferBidFunds(oldOwner, bid.amount, _isETH, _token);
-    MailNames(mailNames).transfer(MailNames(mailNames).nameHashToTokenId(_nameHash), bid.bidder);
+    IMailNames(mailNames).transfer(IMailNames(mailNames).nameHashToTokenId(_nameHash), bid.bidder);
     bidderActiveBids[bid.bidder]--; // Decrement bidder's active bids
     emit BidSettled(_nameHash, bid.bidder, bid.amount, _isETH);
     Bid[100] storage bidsArray = _isETH ? ethBids[_nameHash] : tokenBids[_nameHash][_token];
@@ -199,7 +216,7 @@ contract MailMarket {
 
     function placeETHBid(string memory _name) external payable {
     BidValidation memory validation = _validateBidRequirements(_name, msg.value);
-    Bid memory newBid = Bid(msg.sender, msg.value, block.timestamp);
+    Bid memory newBid = Bid(msg.sender, msg.value, _now());
     Bid[100] storage eb = ethBids[validation.nameHash];
     _insertAndSort(eb, newBid);
     bidderActiveBids[msg.sender]++; // Increment bidder's active bids
@@ -210,7 +227,7 @@ contract MailMarket {
     require(tokenCounts[_token] > 0, "Token not allowed");
     BidValidation memory validation = _validateBidRequirements(_name, _amount);
     uint256 receivedAmount = _handleTokenTransfer(_token, _amount);
-    Bid memory newBid = Bid(msg.sender, receivedAmount, block.timestamp);
+    Bid memory newBid = Bid(msg.sender, receivedAmount, _now());
     Bid[100] storage tb = tokenBids[validation.nameHash][_token];
     _insertAndSort(tb, newBid);
     bidderActiveBids[msg.sender]++; // Increment bidder's active bids
@@ -233,16 +250,16 @@ contract MailMarket {
     if (_isETH) {
         payable(msg.sender).transfer(bid.amount);
     } else {
-        IERC20(_token).transfer(msg.sender, bid.amount * (10 ** IERC20(_token).decimals()));
+        IIERC20(_token).transfer(msg.sender, bid.amount * (10 ** IIERC20(_token).decimals()));
     }
     _removeBidFromArray(bidsArray, _bidIndex);
     bidderActiveBids[msg.sender]--; // Decrement bidder's active bids
     emit BidClosed(_nameHash, msg.sender, bid.amount, _isETH);
 }
 
-    // Changelog: 0.0.2 (05/10/2025) - Updated to call MailNames.acceptMarketBid
+    // Changelog: 0.0.2 (05/10/2025) - Updated to call IMailNames.acceptMarketBid
     function acceptBid(uint256 _nameHash, bool _isETH, address _token, uint256 _bidIndex) external {
-        MailNames(mailNames).acceptMarketBid(_nameHash, _isETH, _token, _bidIndex);
+        IMailNames(mailNames).acceptMarketBid(_nameHash, _isETH, _token, _bidIndex);
     }
 
     function checkTopBidder(uint256 _nameHash) external returns (address bidder, uint256 amount, bool valid) {
@@ -251,9 +268,9 @@ contract MailMarket {
     bidder = bids[0].bidder;
     amount = bids[0].amount;
     uint256 minReq = _calculateMinRequired(0);
-    uint8 dec = IERC20(mailToken).decimals();
+    uint8 dec = IIERC20(mailToken).decimals();
     uint256 normMin = minReq / (10 ** dec);
-    valid = IERC20(mailToken).balanceOf(bidder) >= normMin;
+    valid = IIERC20(mailToken).balanceOf(bidder) >= normMin;
     if (!valid) {
         payable(bidder).transfer(amount); // Refund invalid top bid
         bidderActiveBids[bidder]--; // Decrement bidder’s active bids

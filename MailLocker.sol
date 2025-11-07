@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.1 (05/10/2025)
+// File Version: 0.0.02 (07/11/2025)
 // Changelog:
+// - 07/11/2025: Added time-warp system (currentTime, isWarped, warp(), unWarp(), _now()) to MailNames, MailLocker, MailMarket for VM testing consistency with TrustlessFund
 // - 0.0.1 (05/10): Initial with owner/setters, Deposit struct/array, index withdraw/swap-pop, paginated views, events
 
-interface IERC20 {
+interface IIIERC20 {
     function decimals() external view returns (uint8);
     function balanceOf(address account) external view returns (uint256);
     function transfer(address to, uint256 amount) external returns (bool);
@@ -14,8 +15,11 @@ interface IERC20 {
 
 contract MailLocker {
     address public owner;
-    IERC20 public mailToken;
+    IIIERC20 public mailToken;
     address public mailNames;
+
+    uint256 public currentTime;
+    bool public isWarped;
 
     struct Deposit {
         uint256 amount; // Normalized (no decimals)
@@ -38,6 +42,19 @@ contract MailLocker {
         // Ownership event
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     
+    function warp(uint256 newTimestamp) external onlyOwner {
+    currentTime = newTimestamp;
+    isWarped = true;
+}
+
+function unWarp() external onlyOwner {
+    isWarped = false;
+}
+
+function _now() internal view returns (uint256) {
+    return isWarped ? currentTime : block.timestamp;
+}
+
         // Changelog: 0.0.1 (05/10/2025) - Owner-only transferOwnership: Sets new owner, emits event
     function transferOwnership(address _newOwner) external onlyOwner {
         require(_newOwner != address(0), "Invalid owner");
@@ -47,7 +64,7 @@ contract MailLocker {
     }
 
     function setMailToken(address _mailToken) external onlyOwner {
-        mailToken = IERC20(_mailToken);
+        mailToken = IIIERC20(_mailToken);
     }
 
     function setMailNames(address _mailNames) external onlyOwner {
@@ -70,7 +87,7 @@ contract MailLocker {
         Deposit[] storage deposits = userDeposits[msg.sender];
         require(_index < deposits.length, "Invalid index");
         Deposit storage dep = deposits[_index];
-        require(block.timestamp >= dep.unlockTime, "Not unlocked");
+        require(_now() >= dep.unlockTime, "Not unlocked");
         uint256 amt = dep.amount;
         // Swap and pop
         deposits[_index] = deposits[deposits.length - 1];
