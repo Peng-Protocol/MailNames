@@ -1,16 +1,93 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.1 (07/11/2025)
-// Changelog:
-// - 07/11/2025: Initial implementation.
+// File Version: 0.0.2 (08/11/2025)
+// Changelog Summary:
+// - 08/11/2025: Removed internal deployment of MailNames, MailLocker, MailMarket. Added setMailContracts() to accept pre-deployed instances.
+// - 08/11/2025: Ownership transfer now attempted during setMailContracts() via inline interfaces. Fallback comment added if not possible.
+// - 08/11/2025: _configureContracts() now only configures mailToken and mockERC20; mail system contracts are assumed configured externally.
+// - 08/11/2025: Added require checks for non-zero addresses in setMailContracts().
 
-import "../MailNames.sol";
-import "../MailLocker.sol";
-import "../MailMarket.sol";
 import "./MockMAILToken.sol";
 import "./MockMailTester.sol";
 
+// Inline interfaces to avoid import bloat
+interface MailNames {
+    function mailToken() external view returns (address);
+    function mailLocker() external view returns (address);
+    function mailMarket() external view returns (address);
+    function setMailToken(address) external;
+    function setMailLocker(address) external;
+    function setMailMarket(address) external;
+    function warp(uint256) external;
+    function currentTime() external view returns (uint256);
+    function advance() external;
+    function totalNames() external view returns (uint256);
+    function ownerOf(uint256) external view returns (address);
+    function nameHashToTokenId(uint256) external view returns (uint256);
+    function getNameRecords(string memory) external view returns (NameRecord memory);
+    function pendingCheckins(uint256) external view returns (uint256, address, uint256, uint256);
+    function getSubnameID(string memory, string memory) external view returns (uint256, bool);
+    function processSettlement(uint256) external;
+    function getPendingSettlements(string memory, uint256, uint256) external view returns (PendingSettlement[] memory);
+    function getSettlementById(uint256) external view returns (PendingSettlement memory);
+
+    struct NameRecord {
+        string name;
+        uint256 nameHash;
+        uint256 tokenId;
+        uint256 allowanceEnd;
+        uint256 graceEnd;
+        CustomRecord[5] customRecords;
+    }
+
+    struct CustomRecord {
+        string text;
+        string resolver;
+        string contentHash;
+        uint256 ttl;
+        address targetAddress;
+    }
+
+    struct PendingSettlement {
+        uint256 nameHash;
+        uint256 bidIndex;
+        bool isETH;
+        address token;
+        uint256 queueTime;
+    }
+}
+
+interface MailLocker {
+    function mailToken() external view returns (address);
+    function mailNames() external view returns (address);
+    function setMailToken(address) external;
+    function setMailNames(address) external;
+    function getUserDeposits(address, uint256, uint256) external view returns (Deposit[] memory);
+    function getTotalLocked(address) external view returns (uint256);
+
+    struct Deposit {
+        uint256 amount;
+        uint256 unlockTime;
+    }
+}
+
+interface MailMarket {
+    function mailToken() external view returns (address);
+    function mailNames() external view returns (address);
+    function tokenCounts(address) external view returns (uint256);
+    function setMailToken(address) external;
+    function setMailNames(address) external;
+    function addAllowedToken(address) external;
+    function getNameBids(string memory, bool, address) external view returns (Bid[100] memory);
+
+    struct Bid {
+        address bidder;
+        uint256 amount;
+        uint256 timestamp;
+    }
+}
+    
 contract MailTests {
     MailNames public names;
     MailLocker public locker;
@@ -33,33 +110,93 @@ contract MailTests {
     uint256 public p2NameHash;
     uint256 public p2TokenId;
 
+    event MailContractsSet(address names, address locker, address market);
+    event OwnershipTransferFailed(address target, string reason);
+
     constructor() {
         tester = msg.sender;
-        _deployContracts();
-        _configureContracts();
+        _deployMocks();
+        _configureMocks();
     }
 
-    function _deployContracts() internal {
+    // --- Deploy only mocks (MAIL and ERC20) ---
+    function _deployMocks() internal {
         mailToken = new MockMAILToken();
         mockERC20 = new MockMAILToken();
-        locker = new MailLocker();
-        names = new MailNames();
-        market = new MailMarket();
     }
 
-    function _configureContracts() internal {
-        names.setMailToken(address(mailToken));
-        names.setMailLocker(address(locker));
-        names.setMailMarket(address(market));
-
-        locker.setMailToken(address(mailToken));
-        locker.setMailNames(address(names));
-
-        market.setMailToken(address(mailToken));
-        market.setMailNames(address(names));
-        market.addAllowedToken(address(mockERC20));
-
+    // --- Configure only mock tokens ---
+    function _configureMocks() internal {
         mockERC20.setDetails("Mock ERC20", "MERC", 6);
+    }
+
+    // --- External setup for pre-deployed mail system contracts ---
+    function setMailContracts(
+        address _names,
+        address _locker,
+        address _market
+    ) external {
+        require(msg.sender == tester, "Not tester");
+        require(_names != address(0), "Invalid names");
+        require(_locker != address(0), "Invalid locker");
+        require(_market != address(0), "Invalid market");
+
+        names = MailNames(_names);
+        locker = MailLocker(_locker);
+        market = MailMarket(_market);
+
+        // --- Attempt ownership transfer to this test contract ---
+        // Using inline interfaces to avoid import bloat
+        // If any transfer fails (not implemented, already transferred, etc), emit event and continue
+        _tryTransferOwnership(_names, address(this));
+        _tryTransferOwnership(_locker, address(this));
+        _tryTransferOwnership(_market, address(this));
+
+        // --- Configure dependencies (assumes contracts are pre-initialized) ---
+        // Only set mailToken if not already set
+        if (address(names.mailToken()) == address(0)) {
+            names.setMailToken(address(mailToken));
+        }
+        if (address(names.mailLocker()) == address(0)) {
+            names.setMailLocker(address(locker));
+        }
+        if (address(names.mailMarket()) == address(0)) {
+            names.setMailMarket(address(market));
+        }
+
+        if (address(locker.mailToken()) == address(0)) {
+            locker.setMailToken(address(mailToken));
+        }
+        if (address(locker.mailNames()) == address(0)) {
+            locker.setMailNames(address(names));
+        }
+
+        if (address(market.mailToken()) == address(0)) {
+            market.setMailToken(address(mailToken));
+        }
+        if (address(market.mailNames()) == address(0)) {
+            market.setMailNames(address(names));
+        }
+        if (market.tokenCounts(address(mockERC20)) == 0) {
+            market.addAllowedToken(address(mockERC20));
+        }
+
+        emit MailContractsSet(_names, _locker, _market);
+    }
+
+    // --- Helper: Attempt ownership transfer with try/catch ---
+    function _tryTransferOwnership(address _target, address _newOwner) internal {
+        (bool success, bytes memory data) = _target.call(
+            abi.encodeWithSignature("transferOwnership(address)", _newOwner)
+        );
+        if (!success) {
+            string memory reason = "Unknown";
+            if (data.length > 0) {
+                assembly { reason := add(data, 0x20) }
+            }
+            emit OwnershipTransferFailed(_target, reason);
+            // Non-critical: continue setup
+        }
     }
 
     function initiateTesters() public payable {
@@ -180,17 +317,19 @@ contract MailTests {
     function p2_4TestAcceptBid() public {
         testers[0].proxyCall(address(market), abi.encodeWithSignature("acceptBid(uint256,bool,address,uint256)", p2NameHash, true, address(0), 0));
         assert(names.ownerOf(p2TokenId) == address(testers[2]));
+
+        // Reset for next test
+        testers[0].proxyCall(address(names), abi.encodeWithSignature("mintName(string)", "charlie"));
+        uint256 charlieHash = uint256(keccak256(abi.encodePacked("charlie")));
+        uint256 charlieTokenId = names.nameHashToTokenId(charlieHash);
+        assert(charlieTokenId != 0);
+        names.warp(names.currentTime() + ONE_YEAR + GRACE + 1);
     }
 
     function p2_5TestPostGraceBidSetup() public {
-        testers[0].proxyCall(address(names), abi.encodeWithSignature("mintName(string)", "charlie"));
-        uint256 nameHash = uint256(keccak256(abi.encodePacked("charlie")));
-        uint256 tokenId = names.nameHashToTokenId(nameHash);
-    assert(tokenId != 0); // Verify name was minted successfully
-    names.warp(names.currentTime() + ONE_YEAR + GRACE + 1);
-    _approveMAIL(1, address(market));
-    testers[1].proxyCall{value: 2 ether}(address(market), abi.encodeWithSignature("placeETHBid(string)", "charlie"));
-}
+        _approveMAIL(1, address(market));
+        testers[1].proxyCall{value: 2 ether}(address(market), abi.encodeWithSignature("placeETHBid(string)", "charlie"));
+    }
 
     function p2_6TestQueueSettlement() public {
         MailNames.PendingSettlement[] memory pending = names.getPendingSettlements("charlie", 0, 10);
@@ -199,16 +338,13 @@ contract MailTests {
 
     function p2_7TestPostGraceSettlement() public {
         names.warp(names.currentTime() + THREE_WEEKS + 1);
-        // Get the settlement index for charlie before processing
         MailNames.PendingSettlement[] memory pending = names.getPendingSettlements("charlie", 0, 10);
         require(pending.length > 0, "No pending settlements");
         
-        // Find the actual index in the global pendingSettlements array
         uint256 settlementIndex = 0;
         uint256 charlieHash = uint256(keccak256(abi.encodePacked("charlie")));
         bool found = false;
         
-        // Search through global settlements to find charlie's settlement
         for (uint256 i = 0; i < 100; i++) {
             try names.getSettlementById(i) returns (MailNames.PendingSettlement memory s) {
                 if (s.nameHash == charlieHash) {
@@ -280,7 +416,6 @@ contract MailTests {
         _approveMAIL(1, address(market));
         testers[1].proxyCall{value: 1 ether}(address(market), abi.encodeWithSignature("placeETHBid(string)", "earlysettle"));
         
-        // Find the settlement index
         uint256 earlysettleHash = uint256(keccak256(abi.encodePacked("earlysettle")));
         uint256 settlementIndex = 0;
         bool found = false;
@@ -298,8 +433,6 @@ contract MailTests {
         }
         
         require(found, "Settlement not found for s7");
-        
-        // Try to process before 3 weeks - should revert
         try names.processSettlement(settlementIndex) { revert("Did not revert"); } catch {}
     }
 

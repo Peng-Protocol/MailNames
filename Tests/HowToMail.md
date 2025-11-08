@@ -2,8 +2,8 @@
 
 ## Prerequisites
 - Ensure `MailNames.sol`, `MailLocker.sol`, `MailMarket.sol`, `MockMAILToken.sol`, `MockMailTester.sol`, and `MailTests.sol` are in your Remix workspace.
-- Place core contracts in `./Contracts`.
-- Place mocks and `Mail2Tests.sol` in `./Tests`.
+- Place core contracts in main directory .
+- Place mocks and `MailTests.sol` in `./Tests`.
 
 ## Steps
 1. Open Remix [https://remix.ethereum.org](https://remix.ethereum.org).
@@ -11,26 +11,36 @@
 3. In "Solidity Compiler", select `^0.8.2` and compile all.
 4. In "Deploy & Run Transactions", select **Remix VM**.
 5. Ensure default account has 100 ETH.
-6. Deploy `MailTests` using the default account.
-7. Call `initiateTesters()` with **4 ETH** (value field).
-8. **Path 1 – Basic Lifecycle**:
-   - `p1_1TestMint()`
-   - `p1_2TestSubname()`
-   - `p1_3TestCustomRecord()`
-   - `p1_4TestTransfer()`
-   - `p1_5WarpToExpiration()`
-   - `p1_6TestQueueCheckIn()`
-   - `p1_7TestProcessCheckIn()`
-   - `p1_8TestLockerView()`
-9. **Path 2 – Bidding & Settlement**:
-   - `p2_1TestETHBidSetup()`
-   - `p2_2TestETHBid()`
-   - `p2_3TestTokenBid()`
-   - `p2_4TestAcceptBid()`
-   - `p2_5TestPostGraceBidSetup()`
-   - `p2_6TestQueueSettlement()`
-   - `p2_7TestPostGraceSettlement()`
-10. **Sad Path Tests** (run after redeploy for clean state):
+6. **Deploy the mail system contracts first** (in any order):
+   - Deploy `MailNames`
+   - Deploy `MailLocker`
+   - Deploy `MailMarket`
+7. Deploy `MailTests` using the default account.
+8. Call `setMailContracts(namesAddr, lockerAddr, marketAddr)`:
+   - Paste the **exact addresses** of the deployed `MailNames`, `MailLocker`, `MailMarket` contracts.
+   - This will:
+     - Assign the instances to `MailTests`
+     - Attempt to transfer ownership of all three contracts to `MailTests` (non-critical if fails)
+     - Configure token and cross-references (idempotent)
+9. Call `initiateTesters()` with **4 ETH** (value field).
+10. **Path 1 – Basic Lifecycle**:
+    - `p1_1TestMint()`
+    - `p1_2TestSubname()`
+    - `p1_3TestCustomRecord()`
+    - `p1_4TestTransfer()`
+    - `p1_5WarpToExpiration()`
+    - `p1_6TestQueueCheckIn()`
+    - `p1_7TestProcessCheckIn()`
+    - `p1_8TestLockerView()`
+11. **Path 2 – Bidding & Settlement**:
+    - `p2_1TestETHBidSetup()`
+    - `p2_2TestETHBid()`
+    - `p2_3TestTokenBid()`
+    - `p2_4TestAcceptBid()`
+    - `p2_5TestPostGraceBidSetup()`
+    - `p2_6TestQueueSettlement()`
+    - `p2_7TestPostGraceSettlement()`
+12. **Sad Path Tests** (run after redeploy for clean state):
     - `s1_MintDuplicateName()`
     - `s2_MintInvalidName()`
     - `s3_NonOwnerTransfer()`
@@ -116,10 +126,10 @@ Builds on new name "bob", then "charlie".
 
 - **`p2_2TestETHBid()`**
   - **Action**: tester[2] places 1 ETH bid
-  - **Expected**: Bid appears in `getNameBids("bob", true, ...)`
+  - **Expected**: Bid appears in `getNameBids("bob", true, ...)[0]`
 
 - **`p2_3TestTokenBid()`**
-  - **Action**: tester[3] bids **10 MOCK** (10% balance)
+  - **Action**: tester[3] bids **100 MOCK** (100% balance, 6 decimals)
   - **Expected**: Bid stored under `mockERC20`
 
 - **`p2_4TestAcceptBid()`**
@@ -131,13 +141,13 @@ Builds on new name "bob", then "charlie".
   - **Expected**: Bid queued for settlement
 
 - **`p2_6TestQueueSettlement()`**
-  - **Action**: Call `processSettlement()`
-  - **Expected**: `pendingSettlements` populated with 3-week delay
+  - **Action**: Verify `pendingSettlements` populated
+  - **Expected**: `getPendingSettlements("charlie", ...)` returns queued bid
 
 - **`p2_7TestPostGraceSettlement()`**
-  - **Action**: Warp 3 weeks → `processSettlement()`
+  - **Action**: Warp 3 weeks → `processSettlement(index)`
   - **Expected**: Ownership transferred to highest bidder
-  
+
 ---
 
 ## Notes & Tips
@@ -147,17 +157,23 @@ Builds on new name "bob", then "charlie".
   - Check-ins: **10 min min, 2 weeks max** based on queue length.
   - Settlements: **3 weeks** post-grace.
 
-  - Set gas limit ≥ **10M**
-  - Use **View functions**:
-    - `getNameRecords(name)`
-    - `getPendingSettlements(name, ...)`
-    - `getUserDeposits(user, ...)`
-    - `getNameBids(...)`
+- **Set gas limit ≥ 10M**
+- **View functions**:
+  - `getNameRecords(name)`
+  - `getPendingSettlements(name, step, max)`
+  - `getUserDeposits(user, step, max)`
+  - `getNameBids(name, isETH, token)`
 
 - **Redeploy for Sad Paths**:
   - Clean state avoids interference.
-  - Run `initiateTesters()` again after redeploy.
+  - Run `setMailContracts(...)` + `initiateTesters()` again after redeploy.
 
 - **Events to Watch**:
   - `NameMinted`, `SubnameMinted`, `RecordsUpdated`
   - `BidPlaced`, `BidSettled`, `CheckInProcessed`, `SettlementProcessed`
+  - `MailContractsSet`, `OwnershipTransferFailed` (if ownership transfer skipped)
+
+- **Ownership Transfer**:
+  - `setMailContracts()` attempts to transfer ownership of `MailNames`, `MailLocker`, `MailMarket` to `MailTests`.
+  - If any transfer fails (e.g. already transferred), `OwnershipTransferFailed` is emitted — **non-critical**.
+  - This allows `MailTests` to use `warp()` and `advance()` safely.
