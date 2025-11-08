@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.2 (08/11/2025)
+// File Version: 0.0.3 (08/11/2025)
 // Changelog Summary:
+// - 08/12/2025: Removed automatic ownership transfer attempt. 
 // - 08/11/2025: Removed internal deployment of MailNames, MailLocker, MailMarket. Added setMailContracts() to accept pre-deployed instances.
 // - 08/11/2025: Ownership transfer now attempted during setMailContracts() via inline interfaces. Fallback comment added if not possible.
 // - 08/11/2025: _configureContracts() now only configures mailToken and mockERC20; mail system contracts are assumed configured externally.
@@ -86,7 +87,7 @@ interface MailMarket {
         uint256 amount;
         uint256 timestamp;
     }
-}
+    }
     
 contract MailTests {
     MailNames public names;
@@ -132,72 +133,35 @@ contract MailTests {
 
     // --- External setup for pre-deployed mail system contracts ---
     function setMailContracts(
-        address _names,
-        address _locker,
-        address _market
-    ) external {
-        require(msg.sender == tester, "Not tester");
-        require(_names != address(0), "Invalid names");
-        require(_locker != address(0), "Invalid locker");
-        require(_market != address(0), "Invalid market");
+    address _names,
+    address _locker,
+    address _market
+) external {
+    require(msg.sender == tester, "Not tester");
+    require(_names != address(0), "Invalid names");
+    require(_locker != address(0), "Invalid locker");
+    require(_market != address(0), "Invalid market");
 
-        names = MailNames(_names);
-        locker = MailLocker(_locker);
-        market = MailMarket(_market);
+    names = MailNames(_names);
+    locker = MailLocker(_locker);
+    market = MailMarket(_market);
 
-        // --- Attempt ownership transfer to this test contract ---
-        // Using inline interfaces to avoid import bloat
-        // If any transfer fails (not implemented, already transferred, etc), emit event and continue
-        _tryTransferOwnership(_names, address(this));
-        _tryTransferOwnership(_locker, address(this));
-        _tryTransferOwnership(_market, address(this));
+    // Skip ownership transfers - do them manually before calling this function
+    
+    // Unconditionally set addresses (simpler, less gas than checking first)
+    names.setMailToken(address(mailToken));
+    names.setMailLocker(address(locker));
+    names.setMailMarket(address(market));
 
-        // --- Configure dependencies (assumes contracts are pre-initialized) ---
-        // Only set mailToken if not already set
-        if (address(names.mailToken()) == address(0)) {
-            names.setMailToken(address(mailToken));
-        }
-        if (address(names.mailLocker()) == address(0)) {
-            names.setMailLocker(address(locker));
-        }
-        if (address(names.mailMarket()) == address(0)) {
-            names.setMailMarket(address(market));
-        }
+    locker.setMailToken(address(mailToken));
+    locker.setMailNames(address(names));
 
-        if (address(locker.mailToken()) == address(0)) {
-            locker.setMailToken(address(mailToken));
-        }
-        if (address(locker.mailNames()) == address(0)) {
-            locker.setMailNames(address(names));
-        }
+    market.setMailToken(address(mailToken));
+    market.setMailNames(address(names));
+    market.addAllowedToken(address(mockERC20));
 
-        if (address(market.mailToken()) == address(0)) {
-            market.setMailToken(address(mailToken));
-        }
-        if (address(market.mailNames()) == address(0)) {
-            market.setMailNames(address(names));
-        }
-        if (market.tokenCounts(address(mockERC20)) == 0) {
-            market.addAllowedToken(address(mockERC20));
-        }
-
-        emit MailContractsSet(_names, _locker, _market);
-    }
-
-    // --- Helper: Attempt ownership transfer with try/catch ---
-    function _tryTransferOwnership(address _target, address _newOwner) internal {
-        (bool success, bytes memory data) = _target.call(
-            abi.encodeWithSignature("transferOwnership(address)", _newOwner)
-        );
-        if (!success) {
-            string memory reason = "Unknown";
-            if (data.length > 0) {
-                assembly { reason := add(data, 0x20) }
-            }
-            emit OwnershipTransferFailed(_target, reason);
-            // Non-critical: continue setup
-        }
-    }
+    emit MailContractsSet(_names, _locker, _market);
+}
 
     function initiateTesters() public payable {
         require(msg.sender == tester, "Not tester");

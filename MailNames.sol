@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.21 (07/11/2025)
+// File Version: 0.0.22 (07/11/2025)
 // Changelog:
+// - 08/11/2025: Removed unnecessary token count check in various functions. 
 // - 07/11/2025: Added time-warp system (currentTime, isWarped, warp(), unWarp(), _now()) to MailNames, IMailLocker, IMailMarket for VM testing consistency with TrustlessFund
 // - 0.0.20 (06/10): Updated getNameRecords to return single record; added getSettlementById
 // - 0.0.19 (06/10): Updated getNameRecords, getPendingSettlements to use name string
@@ -327,7 +328,7 @@ function _now() internal view returns (uint256) {
         require(_validateName(_subname), "Invalid subname");
         uint256 parentHash = _stringToHash(_parentName);
         uint256 tokenId = nameHashToTokenId[parentHash];
-        require(tokenId != 0 && ownerOf[tokenId] == msg.sender, "Not parent owner");
+        require(ownerOf[tokenId] == msg.sender, "Not parent owner");
         uint256 subnameHash = _stringToHash(_subname);
         subnameRecords[parentHash].push();
         uint256 newIndex = subnameRecords[parentHash].length - 1;
@@ -408,7 +409,7 @@ function _now() internal view returns (uint256) {
     function setCustomRecord(uint256 _nameHash, uint256 _index, CustomRecord memory _record) external {
         _validateRecord(_record);
         uint256 tokenId = nameHashToTokenId[_nameHash];
-        require(tokenId != 0 && ownerOf[tokenId] == msg.sender, "Not owner");
+        require(ownerOf[tokenId] == msg.sender, "Not owner");
         require(_index < 5, "Invalid index");
         nameRecords[_nameHash].customRecords[_index] = _record;
         emit RecordsUpdated(_nameHash, msg.sender);
@@ -417,7 +418,7 @@ function _now() internal view returns (uint256) {
     function setSubnameRecord(uint256 _parentHash, uint256 _subnameIndex, uint256 _recordIndex, CustomRecord memory _record) external {
         _validateRecord(_record);
         uint256 tokenId = nameHashToTokenId[_parentHash];
-        require(tokenId != 0 && ownerOf[tokenId] == msg.sender, "Not parent owner");
+        require(ownerOf[tokenId] == msg.sender, "Not parent owner");
         require(_subnameIndex < subnameRecords[_parentHash].length, "Invalid subname index");
         require(_recordIndex < 5, "Invalid record index");
         subnameRecords[_parentHash][_subnameIndex].customRecords[_recordIndex] = _record;

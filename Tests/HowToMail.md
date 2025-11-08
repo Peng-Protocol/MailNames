@@ -20,8 +20,8 @@
    - Paste the **exact addresses** of the deployed `MailNames`, `MailLocker`, `MailMarket` contracts.
    - This will:
      - Assign the instances to `MailTests`
-     - Attempt to transfer ownership of all three contracts to `MailTests` (non-critical if fails)
-     - Configure token and cross-references (idempotent)
+     - Configure token and cross-references 
+   - Transfer ownership of all three subject contracts to `MailTests`.
 9. Call `initiateTesters()` with **4 ETH** (value field).
 10. **Path 1 – Basic Lifecycle**:
     - `p1_1TestMint()`
