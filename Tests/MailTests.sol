@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.3 (08/11/2025)
+// File Version: 0.0.4 (09/11/2025)
 // Changelog Summary:
+// - 08/12/2025: Adjusted path_1 time warp to check warped time.
 // - 08/12/2025: Removed automatic ownership transfer attempt. 
 // - 08/11/2025: Removed internal deployment of MailNames, MailLocker, MailMarket. Added setMailContracts() to accept pre-deployed instances.
 // - 08/11/2025: Ownership transfer now attempted during setMailContracts() via inline interfaces. Fallback comment added if not possible.
@@ -32,6 +33,7 @@ interface MailNames {
     function processSettlement(uint256) external;
     function getPendingSettlements(string memory, uint256, uint256) external view returns (PendingSettlement[] memory);
     function getSettlementById(uint256) external view returns (PendingSettlement memory);
+    function transferOwnership(address _newOwner) external;
 
     struct NameRecord {
         string name;
@@ -66,6 +68,7 @@ interface MailLocker {
     function setMailNames(address) external;
     function getUserDeposits(address, uint256, uint256) external view returns (Deposit[] memory);
     function getTotalLocked(address) external view returns (uint256);
+    function transferOwnership(address _newOwner) external;
 
     struct Deposit {
         uint256 amount;
@@ -81,6 +84,7 @@ interface MailMarket {
     function setMailNames(address) external;
     function addAllowedToken(address) external;
     function getNameBids(string memory, bool, address) external view returns (Bid[100] memory);
+    function transferOwnership(address _newOwner) external;
 
     struct Bid {
         address bidder;
@@ -163,6 +167,18 @@ contract MailTests {
     emit MailContractsSet(_names, _locker, _market);
 }
 
+// Return ownership of all three contracts to caller (for reset without redeploying)
+function returnOwnership() external {
+    require(msg.sender == tester, "Not tester");
+    require(address(names) != address(0), "No names contract set");
+    require(address(locker) != address(0), "No locker contract set");
+    require(address(market) != address(0), "No market contract set");
+    
+    names.transferOwnership(msg.sender);
+    locker.transferOwnership(msg.sender);
+    market.transferOwnership(msg.sender);
+}
+
     function initiateTesters() public payable {
         require(msg.sender == tester, "Not tester");
         require(msg.value == 4 ether, "Send 4 ETH");
@@ -226,11 +242,12 @@ contract MailTests {
         testers[0].proxyCall(address(names), abi.encodeWithSignature("transferName(uint256,address)", p1NameHash, address(testers[1])));
         assert(names.ownerOf(p1TokenId) == address(testers[1]));
     }
-
-    function p1_5WarpToExpiration() public {
+    
+function p1_5WarpToExpiration() public {
         names.warp(block.timestamp + ONE_YEAR + 1);
-        MailNames.NameRecord memory rec = names.getNameRecords("alice");
-        assert(block.timestamp > rec.allowanceEnd);
+MailNames.NameRecord memory rec = names.getNameRecords("alice");
+        // Check the warped time, not the real block.timestamp
+        assert(names.currentTime() > rec.allowanceEnd);
     }
 
     function p1_6TestQueueCheckIn() public {

@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.22 (07/11/2025)
+// File Version: 0.0.26 (09/11/2025)
 // Changelog:
+// - 09/11/2025: Added max approval when setting locker.
+// - 09/11/2025: Improved check-in billing accuracy. 
+// - 09/11/2025: Added non-zero token hash check in key functions. 
 // - 08/11/2025: Removed unnecessary token count check in various functions. 
 // - 07/11/2025: Added time-warp system (currentTime, isWarped, warp(), unWarp(), _now()) to MailNames, IMailLocker, IMailMarket for VM testing consistency with TrustlessFund
 // - 0.0.20 (06/10): Updated getNameRecords to return single record; added getSettlementById
@@ -31,6 +34,7 @@ interface IERC20 {
     function balanceOf(address account) external view returns (uint256);
     function transfer(address to, uint256 amount) external returns (bool);
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
+    function approve(address spender, uint256 amount) external returns (bool);
 }
 
 interface IERC721Receiver {
@@ -173,7 +177,9 @@ function _now() internal view returns (uint256) {
 
     function setMailLocker(address _mailLocker) external onlyOwner {
         mailLocker = _mailLocker;
-    }
+        // Grant infinite approval to the locker
+        IERC20(mailToken).approve(_mailLocker, type(uint256).max);
+}
 
     function setMailMarket(address _mailMarket) external onlyOwner {
         mailMarket = _mailMarket;
@@ -239,11 +245,16 @@ function _now() internal view returns (uint256) {
 
     function _processQueueRequirements() private returns (uint256 queueLen, uint256 minRequired) {
         queueLen = pendingCheckins.length - nextProcessIndex;
-        minRequired = _calculateMinRequired(queueLen);
+        // 1. Get the normalized amount (e.g., 1)
+        uint256 minRequiredNormalized = _calculateMinRequired(queueLen);
+        // 2. Calculate the full amount (e.g., 1e18)
+uint8 decimals = IERC20(mailToken).decimals();
+        minRequired = minRequiredNormalized * (10 ** decimals); // This is the full amount in wei
+        // 3. Transfer the full amount
         IERC20(mailToken).transferFrom(msg.sender, address(this), minRequired);
-        uint8 decimals = IERC20(mailToken).decimals();
-        uint256 normalized = minRequired / (10 ** decimals);
-        IMailLocker(mailLocker).depositLock(normalized, msg.sender, _now() + 365 days * 10);
+        // 4. Lock the normalized amount
+        uint256 normalized = minRequiredNormalized; // This is the normalized amount (e.g., 1)
+IMailLocker(mailLocker).depositLock(normalized, msg.sender, _now() + 365 days * 10);
     }
 
          // Changelog: 0.0.17 (06/10/2025) - Queues post-grace settlements, handles checkin
@@ -374,8 +385,12 @@ function _now() internal view returns (uint256) {
     }
 
     function queueCheckIn(uint256 _nameHash) external {
+        // 1. Check for existence *first*
+        require(nameRecords[_nameHash].nameHash != 0, "Name not minted");
+        // 2. Check for ownership (buggy 'tokenId != 0' is removed)
         uint256 tokenId = nameHashToTokenId[_nameHash];
-        require(tokenId != 0 && ownerOf[tokenId] == msg.sender, "Not owner");
+require(ownerOf[tokenId] == msg.sender, "Not owner");
+        // 3. Proceed with check-in
         NameRecord storage record = nameRecords[_nameHash];
         require(_now() > record.allowanceEnd, "Not expired");
         (uint256 queueLen, uint256 minRequired) = _processQueueRequirements();
@@ -385,9 +400,10 @@ function _now() internal view returns (uint256) {
         this.advance();
     }
 
-    function transferName(uint256 _nameHash, address _newOwner) external {
+function transferName(uint256 _nameHash, address _newOwner) external {
+        require(nameRecords[_nameHash].nameHash != 0, "Name not minted"); //This ensures the name hash is not zero.
         uint256 tokenId = nameHashToTokenId[_nameHash];
-        require(tokenId != 0, "Name not minted");
+// Removed unnecessary token ID zero check
         _transfer(tokenId, _newOwner);
     }
 
@@ -434,10 +450,11 @@ function _now() internal view returns (uint256) {
     
     function getName(string memory _name) external view returns (address _owner) {
         uint256 nameHash = _stringToHash(_name);
-        uint256 tokenId = nameHashToTokenId[nameHash];
-        require(tokenId != 0, "Name not registered!");
+        require(nameRecords[nameHash].nameHash != 0, "Name not registered!"); // Checks name hash is non-zero
+uint256 tokenId = nameHashToTokenId[nameHash];
+        // removed non-zero token ID check 'require(tokenId != 0, ...)'
         return ownerOf[tokenId];
-    }
+}
 
         // Changelog: 0.0.20 (06/10/2025) - Returns single NameRecord for name string
         function getNameRecords(string memory _name) external view returns (NameRecord memory record) {
