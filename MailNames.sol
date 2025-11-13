@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.27 (13/11/2025)
+// File Version: 0.0.28 (13/11/2025)
 // Changelog:
+// - ++ v0.0.22 in acceptMarketBid
 // - ++ v0.0.22 in _processNextCheckin
 // - 09/11/2025: Added max approval when setting locker.
 // - 09/11/2025: Improved check-in billing accuracy. 
@@ -304,10 +305,16 @@ IMailLocker(mailLocker).depositLock(normalized, msg.sender, _now() + 365 days * 
             pendingSettlements.pop();
         }
 
-    // Changelog: 0.0.13 (05/10/2025) - Added to allow owner to accept bid via IMailMarket
+    // Changelog: 0.0.28 (13/11/2025) - Removed "tokenId != 0" check, replaced with "nameHash != 0"
     function acceptMarketBid(uint256 _nameHash, bool _isETH, address _token, uint256 _bidIndex) external {
+        // 1. Check for existence first
+        require(nameRecords[_nameHash].nameHash != 0, "Name not minted");
+
+        // 2. Check for ownership (buggy 'tokenId != 0' removed)
         uint256 tokenId = nameHashToTokenId[_nameHash];
-        require(tokenId != 0 && ownerOf[tokenId] == msg.sender, "Not owner");
+require(ownerOf[tokenId] == msg.sender, "Not owner");
+        
+        // 3. Proceed with logic
         NameRecord storage record = nameRecords[_nameHash];
         require(_now() <= record.allowanceEnd, "Allowance expired");
         _settleBid(_nameHash, _bidIndex, _isETH, _token);

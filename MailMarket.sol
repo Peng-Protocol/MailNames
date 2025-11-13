@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.07 (07/11/2025)
+// File Version: 0.0.8 (13/11/2025)
 // Changelog:
+// - 13/11/2035: Removed "tokenId != 0" in various functions , replaced with other suitable checks. 
 // - 07/11/2025: Added time-warp system (currentTime, isWarped, warp(), unWarp(), _now()) to IMailNames, MailLocker, MailMarket for VM testing consistency with TrustlessFund
 // - 0.0.6 (07/10): Updated checkTopBidder to close invalid top bid, refund, and clear data
 // - 0.0.5 (07/10): Added getBidderBids to view bidder’s bid indices per token
@@ -176,11 +177,15 @@ function _now() internal view returns (uint256) {
         }
     }
 
+// (0.0.8) Removed "tokenId != 0" check, replaced with ownership check
     function _validateBidRequirements(string memory _name, uint256 _bidAmount) private view returns (BidValidation memory validation) {
     validation.nameHash = _stringToHash(_name);
     validation.tokenId = IMailNames(mailNames).nameHashToTokenId(validation.nameHash);
-    require(validation.tokenId != 0, "Name not minted");
-    require(_bidAmount > 0, "Invalid bid amount");
+    
+    // Check if the owner is non-zero, which works for tokenId 0
+    require(IMailNames(mailNames).ownerOf(validation.tokenId) != address(0), "Name not minted");
+
+require(_bidAmount > 0, "Invalid bid amount");
     validation.queueLen = 0;
     validation.minReq = _calculateMinRequired(validation.queueLen) * (bidderActiveBids[msg.sender] + 1); // Scale by user's bids
     uint8 dec = IIERC20(mailToken).decimals();

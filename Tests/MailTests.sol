@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.4 (09/11/2025)
+// File Version: 0.0.6 (13/11/2025)
 // Changelog Summary:
+// - 13/11/2025: Increased ETH amount in initiateTesters  to avoid out-of-gas issues in proxyCall{value: 1 ether}(...))
+// - 13/11/2025: Added pre-test unWarp() calls to p2_1TestETHBidSetup and s1_MintDuplicateName to reset any lingering time-warp state from previous test paths.
 // - 08/12/2025: Adjusted path_1 time warp to check warped time.
 // - 08/12/2025: Removed automatic ownership transfer attempt. 
 // - 08/11/2025: Removed internal deployment of MailNames, MailLocker, MailMarket. Added setMailContracts() to accept pre-deployed instances.
@@ -22,6 +24,8 @@ interface MailNames {
     function setMailLocker(address) external;
     function setMailMarket(address) external;
     function warp(uint256) external;
+    function isWarped() external view returns (bool);
+    function unWarp() external;
     function currentTime() external view returns (uint256);
     function advance() external;
     function totalNames() external view returns (uint256);
@@ -69,6 +73,8 @@ interface MailLocker {
     function getUserDeposits(address, uint256, uint256) external view returns (Deposit[] memory);
     function getTotalLocked(address) external view returns (uint256);
     function transferOwnership(address _newOwner) external;
+    function isWarped() external view returns (bool);
+    function unWarp() external;
 
     struct Deposit {
         uint256 amount;
@@ -85,6 +91,8 @@ interface MailMarket {
     function addAllowedToken(address) external;
     function getNameBids(string memory, bool, address) external view returns (Bid[100] memory);
     function transferOwnership(address _newOwner) external;
+    function isWarped() external view returns (bool);
+    function unWarp() external;
 
     struct Bid {
         address bidder;
@@ -181,8 +189,7 @@ function returnOwnership() external {
 
     function initiateTesters() public payable {
         require(msg.sender == tester, "Not tester");
-        require(msg.value == 4 ether, "Send 4 ETH");
-
+        require(msg.value == 5 ether, "Send 5 ETH"); // Updated to 5 ETH: 4 for testers, 1 retained
         for (uint i = 0; i < 4; i++) {
             MockMailTester t = new MockMailTester(address(this));
             (bool s,) = address(t).call{value: 1 ether}("");
@@ -273,11 +280,16 @@ MailNames.NameRecord memory rec = names.getNameRecords("alice");
 
     // --- p2: Bidding & Settlement (Chained) ---
     function p2_1TestETHBidSetup() public {
-        testers[0].proxyCall(address(names), abi.encodeWithSignature("mintName(string)", "bob"));
-        p2NameHash = uint256(keccak256(abi.encodePacked("bob")));
-        p2TokenId = names.nameHashToTokenId(p2NameHash);
-        names.warp(block.timestamp + ONE_YEAR + GRACE + 1);
-    }
+    // Reset any lingering time-warp from previous test paths
+    if (names.isWarped()) names.unWarp();
+    if (locker.isWarped()) locker.unWarp();
+    if (market.isWarped()) market.unWarp();
+
+    testers[0].proxyCall(address(names), abi.encodeWithSignature("mintName(string)", "bob"));
+    p2NameHash = uint256(keccak256(abi.encodePacked("bob")));
+    p2TokenId = names.nameHashToTokenId(p2NameHash);
+    names.warp(block.timestamp + ONE_YEAR + GRACE + 1);
+}
 
     function p2_2TestETHBid() public {
         _approveMAIL(2, address(market));
@@ -346,10 +358,15 @@ MailNames.NameRecord memory rec = names.getNameRecords("alice");
 
     // --- s: Sad Paths (Independent) ---
     function s1_MintDuplicateName() public {
-        testers[0].proxyCall(address(names), abi.encodeWithSignature("mintName(string)", "duplicate"));
-        try testers[0].proxyCall(address(names), abi.encodeWithSignature("mintName(string)", "duplicate"))
-        { revert("Did not revert"); } catch {}
-    }
+    // Ensure clean time state before attempting mints
+    if (names.isWarped()) names.unWarp();
+    if (locker.isWarped()) locker.unWarp();
+    if (market.isWarped()) market.unWarp();
+
+    testers[0].proxyCall(address(names), abi.encodeWithSignature("mintName(string)", "duplicate"));
+    try testers[0].proxyCall(address(names), abi.encodeWithSignature("mintName(string)", "duplicate"))
+    { revert("Did not revert"); } catch {}
+}
 
     function s2_MintInvalidName() public {
         try testers[0].proxyCall(address(names), abi.encodeWithSignature("mintName(string)", "a b"))

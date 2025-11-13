@@ -22,7 +22,7 @@
      - Assign the instances to `MailTests`
      - Configure token and cross-references 
    - Transfer ownership of all three subject contracts to `MailTests`.
-9. Call `initiateTesters()` with **4 ETH** (value field).
+9. Call `initiateTesters()` with **5 ETH** (value field).
 10. **Path 1 – Basic Lifecycle**:
     - `p1_1TestMint()`
     - `p1_2TestSubname()`
@@ -32,7 +32,7 @@
     - `p1_6TestQueueCheckIn()`
     - `p1_7TestProcessCheckIn()`
     - `p1_8TestLockerView()`
-11. **Path 2 – Bidding & Settlement**:
+11. **Path 2 – Bidding & Settlement** ():
     - `p2_1TestETHBidSetup()`
     - `p2_2TestETHBid()`
     - `p2_3TestTokenBid()`
@@ -40,7 +40,7 @@
     - `p2_5TestPostGraceBidSetup()`
     - `p2_6TestQueueSettlement()`
     - `p2_7TestPostGraceSettlement()`
-12. **Sad Path Tests** (run after redeploy for clean state):
+12. **Sad Path Tests** ():
     - `s1_MintDuplicateName()`
     - `s2_MintInvalidName()`
     - `s3_NonOwnerTransfer()`
@@ -59,7 +59,7 @@
 ## Objectives (Happy Paths)
 
 ### 7. `initiateTesters()`
-- **Purpose**: Deploy 4 proxy tester contracts to simulate real users.
+- **Purpose**: Deploy 4 proxy tester contracts to simulate real users. 
 - **Action**: Each tester receives:
   - 1 ETH (for gas/bids)
   - **100 MAIL** (18 decimals)
