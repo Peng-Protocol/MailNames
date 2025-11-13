@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.26 (09/11/2025)
+// File Version: 0.0.27 (13/11/2025)
 // Changelog:
+// - ++ v0.0.22 in _processNextCheckin
 // - 09/11/2025: Added max approval when setting locker.
 // - 09/11/2025: Improved check-in billing accuracy. 
 // - 09/11/2025: Added non-zero token hash check in key functions. 
@@ -369,8 +370,14 @@ IMailLocker(mailLocker).depositLock(normalized, msg.sender, _now() + 365 days * 
             if (nextProcessIndex >= pendingCheckins.length) return;
             PendingCheckin memory nextCheck = pendingCheckins[nextProcessIndex];
             if (_now() < nextCheck.queuedTime + nextCheck.waitDuration) return;
+            
+            // First, check that the name actually exists
+            require(nameRecords[nextCheck.nameHash].nameHash != 0, "Name not minted");
+
+            // Now, check ownership without the "tokenId != 0" bug
             uint256 tokenId = nameHashToTokenId[nextCheck.nameHash];
-            require(tokenId != 0 && ownerOf[tokenId] == nextCheck.user, "No longer owner");
+require(ownerOf[tokenId] == nextCheck.user, "No longer owner");
+            
             NameRecord storage record = nameRecords[nextCheck.nameHash];
             record.allowanceEnd = _now() + ALLOWANCE_PERIOD;
             record.graceEnd = _now() + ALLOWANCE_PERIOD + GRACE_PERIOD;
