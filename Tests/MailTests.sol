@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.8 (16/11/2025)
+// File Version: 0.0.11 (16/11/2025)
 // Changelog Summary:
+// - 16/11/2025: Adjusted s5 to transfer tester 3's $MAIL to ensure invalid bid fails. 
+// - 16/11/2025: Split path 2 into p2a (pre-expiration) and p2b (post-expiration) to avoid time warp conflicts
+// - 16/11/2025: Fixed 2_4 and s6 call target, mailNames.acceptMarketBid not mailMarket.acceptBid. 
 // - 16/11/2025: Fixed 2_3 normalization. 
 // - 16/11/2025: Increased ETH distribution in initiateTesters, added receive().
 // - 13/11/2025: Increased ETH amount in initiateTesters  to avoid out-of-gas issues in proxyCall{value: 1 ether}(...))
@@ -101,7 +104,7 @@ interface MailMarket {
         uint256 amount;
         uint256 timestamp;
     }
-    }
+}
     
 contract MailTests {
     MailNames public names;
@@ -121,9 +124,13 @@ contract MailTests {
     uint256 public p1NameHash;
     uint256 public p1TokenId;
 
-    // --- p2 state ---
-    uint256 public p2NameHash;
-    uint256 public p2TokenId;
+    // --- p2a state (pre-expiration) ---
+    uint256 public p2aNameHash;
+    uint256 public p2aTokenId;
+
+    // --- p2b state (post-expiration) ---
+    uint256 public p2bNameHash;
+    uint256 public p2bTokenId;
 
     event MailContractsSet(address names, address locker, address market);
     event OwnershipTransferFailed(address target, string reason);
@@ -150,47 +157,47 @@ contract MailTests {
 
     // --- External setup for pre-deployed mail system contracts ---
     function setMailContracts(
-    address _names,
-    address _locker,
-    address _market
-) external {
-    require(msg.sender == tester, "Not tester");
-    require(_names != address(0), "Invalid names");
-    require(_locker != address(0), "Invalid locker");
-    require(_market != address(0), "Invalid market");
+        address _names,
+        address _locker,
+        address _market
+    ) external {
+        require(msg.sender == tester, "Not tester");
+        require(_names != address(0), "Invalid names");
+        require(_locker != address(0), "Invalid locker");
+        require(_market != address(0), "Invalid market");
 
-    names = MailNames(_names);
-    locker = MailLocker(_locker);
-    market = MailMarket(_market);
+        names = MailNames(_names);
+        locker = MailLocker(_locker);
+        market = MailMarket(_market);
 
-    // Skip ownership transfers - do them manually before calling this function
-    
-    // Unconditionally set addresses (simpler, less gas than checking first)
-    names.setMailToken(address(mailToken));
-    names.setMailLocker(address(locker));
-    names.setMailMarket(address(market));
+        // Skip ownership transfers - do them manually before calling this function
+        
+        // Unconditionally set addresses (simpler, less gas than checking first)
+        names.setMailToken(address(mailToken));
+        names.setMailLocker(address(locker));
+        names.setMailMarket(address(market));
 
-    locker.setMailToken(address(mailToken));
-    locker.setMailNames(address(names));
+        locker.setMailToken(address(mailToken));
+        locker.setMailNames(address(names));
 
-    market.setMailToken(address(mailToken));
-    market.setMailNames(address(names));
-    market.addAllowedToken(address(mockERC20));
+        market.setMailToken(address(mailToken));
+        market.setMailNames(address(names));
+        market.addAllowedToken(address(mockERC20));
 
-    emit MailContractsSet(_names, _locker, _market);
-}
+        emit MailContractsSet(_names, _locker, _market);
+    }
 
-// Return ownership of all three contracts to caller (for reset without redeploying)
-function returnOwnership() external {
-    require(msg.sender == tester, "Not tester");
-    require(address(names) != address(0), "No names contract set");
-    require(address(locker) != address(0), "No locker contract set");
-    require(address(market) != address(0), "No market contract set");
-    
-    names.transferOwnership(msg.sender);
-    locker.transferOwnership(msg.sender);
-    market.transferOwnership(msg.sender);
-}
+    // Return ownership of all three contracts to caller (for reset without redeploying)
+    function returnOwnership() external {
+        require(msg.sender == tester, "Not tester");
+        require(address(names) != address(0), "No names contract set");
+        require(address(locker) != address(0), "No locker contract set");
+        require(address(market) != address(0), "No market contract set");
+        
+        names.transferOwnership(msg.sender);
+        locker.transferOwnership(msg.sender);
+        market.transferOwnership(msg.sender);
+    }
 
     function initiateTesters() public payable {
         require(msg.sender == tester, "Not tester");
@@ -257,9 +264,9 @@ function returnOwnership() external {
         assert(names.ownerOf(p1TokenId) == address(testers[1]));
     }
     
-function p1_5WarpToExpiration() public {
+    function p1_5WarpToExpiration() public {
         names.warp(block.timestamp + ONE_YEAR + 1);
-MailNames.NameRecord memory rec = names.getNameRecords("alice");
+        MailNames.NameRecord memory rec = names.getNameRecords("alice");
         // Check the warped time, not the real block.timestamp
         assert(names.currentTime() > rec.allowanceEnd);
     }
@@ -285,73 +292,82 @@ MailNames.NameRecord memory rec = names.getNameRecords("alice");
         assert(locker.getTotalLocked(address(testers[1])) == deps[0].amount);
     }
 
-    // --- p2: Bidding & Settlement (Chained) ---
-    function p2_1TestETHBidSetup() public {
-    // Reset any lingering time-warp from previous test paths
-    if (names.isWarped()) names.unWarp();
-    if (locker.isWarped()) locker.unWarp();
-    if (market.isWarped()) market.unWarp();
+    // --- p2a: Pre-Expiration Bidding (Chained) ---
+    function p2a_1TestPreExpirationSetup() public {
+        // Reset any lingering time-warp from previous test paths
+        if (names.isWarped()) names.unWarp();
+        if (locker.isWarped()) locker.unWarp();
+        if (market.isWarped()) market.unWarp();
 
-    testers[0].proxyCall(address(names), abi.encodeWithSignature("mintName(string)", "bob"));
-    p2NameHash = uint256(keccak256(abi.encodePacked("bob")));
-    p2TokenId = names.nameHashToTokenId(p2NameHash);
-    names.warp(block.timestamp + ONE_YEAR + GRACE + 1);
-}
+        testers[0].proxyCall(address(names), abi.encodeWithSignature("mintName(string)", "bob"));
+        p2aNameHash = uint256(keccak256(abi.encodePacked("bob")));
+        p2aTokenId = names.nameHashToTokenId(p2aNameHash);
+        // NO TIME WARP - name is still valid
+    }
 
-    function p2_2TestETHBid() public {
+    function p2a_2TestPreExpirationETHBid() public {
         _approveMAIL(2, address(market));
         testers[2].proxyCall{value: 1 ether}(address(market), abi.encodeWithSignature("placeETHBid(string)", "bob"));
         MailMarket.Bid memory bid = market.getNameBids("bob", true, address(0))[0];
         assert(bid.bidder == address(testers[2]) && bid.amount == 1 ether);
     }
 
-    function p2_3TestTokenBid() public {
+    function p2a_3TestPreExpirationTokenBid() public {
         _approveERC20(3, address(market));
         testers[3].proxyCall(
             address(market), 
-            // CHANGED: Pass the normalized amount '100' instead of the full amount '100 * 1e6'
             abi.encodeWithSignature("placeTokenBid(string,uint256,address)", "bob", 100, address(mockERC20))
         );
         MailMarket.Bid memory bid = market.getNameBids("bob", false, address(mockERC20))[0];
         assert(bid.bidder == address(testers[3]));
-        // The contract correctly received 100 * 1e6, but the assertion should check the normalized amount
         assert(bid.amount == 100); 
     }
 
-    function p2_4TestAcceptBid() public {
-        testers[0].proxyCall(address(market), abi.encodeWithSignature("acceptBid(uint256,bool,address,uint256)", p2NameHash, true, address(0), 0));
-        assert(names.ownerOf(p2TokenId) == address(testers[2]));
-
-        // Reset for next test
-        testers[0].proxyCall(address(names), abi.encodeWithSignature("mintName(string)", "charlie"));
-        uint256 charlieHash = uint256(keccak256(abi.encodePacked("charlie")));
-        uint256 charlieTokenId = names.nameHashToTokenId(charlieHash);
-        assert(charlieTokenId != 0);
-        names.warp(names.currentTime() + ONE_YEAR + GRACE + 1);
+    function p2a_4TestAcceptBidPreExpiration() public {
+        // Accept bid BEFORE expiration (owner-initiated)
+        testers[0].proxyCall(
+            address(names),
+            abi.encodeWithSignature("acceptMarketBid(uint256,bool,address,uint256)", p2aNameHash, true, address(0), 0)
+        );
+        assert(names.ownerOf(p2aTokenId) == address(testers[2]));
     }
 
-    function p2_5TestPostGraceBidSetup() public {
+    // --- p2b: Post-Expiration Bidding & Settlement (Chained) ---
+    function p2b_1TestPostExpirationSetup() public {
+        // Reset any lingering time-warp from previous test paths
+        if (names.isWarped()) names.unWarp();
+        if (locker.isWarped()) locker.unWarp();
+        if (market.isWarped()) market.unWarp();
+
+        testers[0].proxyCall(address(names), abi.encodeWithSignature("mintName(string)", "charlie"));
+        p2bNameHash = uint256(keccak256(abi.encodePacked("charlie")));
+        p2bTokenId = names.nameHashToTokenId(p2bNameHash);
+        
+        // WARP past expiration AND grace period
+        names.warp(block.timestamp + ONE_YEAR + GRACE + 1);
+    }
+
+    function p2b_2TestPostExpirationBid() public {
         _approveMAIL(1, address(market));
         testers[1].proxyCall{value: 2 ether}(address(market), abi.encodeWithSignature("placeETHBid(string)", "charlie"));
     }
 
-    function p2_6TestQueueSettlement() public {
+    function p2b_3TestQueueSettlement() public {
         MailNames.PendingSettlement[] memory pending = names.getPendingSettlements("charlie", 0, 10);
         assert(pending.length > 0 && pending[0].queueTime > 0);
     }
 
-    function p2_7TestPostGraceSettlement() public {
+    function p2b_4TestPostGraceSettlement() public {
         names.warp(names.currentTime() + THREE_WEEKS + 1);
         MailNames.PendingSettlement[] memory pending = names.getPendingSettlements("charlie", 0, 10);
         require(pending.length > 0, "No pending settlements");
         
         uint256 settlementIndex = 0;
-        uint256 charlieHash = uint256(keccak256(abi.encodePacked("charlie")));
         bool found = false;
         
         for (uint256 i = 0; i < 100; i++) {
             try names.getSettlementById(i) returns (MailNames.PendingSettlement memory s) {
-                if (s.nameHash == charlieHash) {
+                if (s.nameHash == p2bNameHash) {
                     settlementIndex = i;
                     found = true;
                     break;
@@ -363,21 +379,20 @@ MailNames.NameRecord memory rec = names.getNameRecords("alice");
         
         require(found, "Settlement not found");
         names.processSettlement(settlementIndex);
-        uint256 tokenId = names.nameHashToTokenId(charlieHash);
-        assert(names.ownerOf(tokenId) == address(testers[1]));
+        assert(names.ownerOf(p2bTokenId) == address(testers[1]));
     }
 
     // --- s: Sad Paths (Independent) ---
     function s1_MintDuplicateName() public {
-    // Ensure clean time state before attempting mints
-    if (names.isWarped()) names.unWarp();
-    if (locker.isWarped()) locker.unWarp();
-    if (market.isWarped()) market.unWarp();
+        // Ensure clean time state before attempting mints
+        if (names.isWarped()) names.unWarp();
+        if (locker.isWarped()) locker.unWarp();
+        if (market.isWarped()) market.unWarp();
 
-    testers[0].proxyCall(address(names), abi.encodeWithSignature("mintName(string)", "duplicate"));
-    try testers[0].proxyCall(address(names), abi.encodeWithSignature("mintName(string)", "duplicate"))
-    { revert("Did not revert"); } catch {}
-}
+        testers[0].proxyCall(address(names), abi.encodeWithSignature("mintName(string)", "duplicate"));
+        try testers[0].proxyCall(address(names), abi.encodeWithSignature("mintName(string)", "duplicate"))
+        { revert("Did not revert"); } catch {}
+    }
 
     function s2_MintInvalidName() public {
         try testers[0].proxyCall(address(names), abi.encodeWithSignature("mintName(string)", "a b"))
@@ -402,12 +417,20 @@ MailNames.NameRecord memory rec = names.getNameRecords("alice");
     }
 
     function s5_BidWithoutMAIL() public {
-        testers[0].proxyCall(address(names), abi.encodeWithSignature("mintName(string)", "nomail"));
-        names.warp(block.timestamp + ONE_YEAR + GRACE + 1);
-        try testers[3].proxyCall{value: 1 ether}(
-            address(market), abi.encodeWithSignature("placeETHBid(string)", "nomail")
-        ) { revert("Did not revert"); } catch {}
-    }
+    testers[0].proxyCall(address(names), abi.encodeWithSignature("mintName(string)", "nomail"));
+    names.warp(block.timestamp + ONE_YEAR + GRACE + 1);
+    
+    // First, transfer away tester[3]'s MAIL tokens so they have insufficient balance
+    testers[3].proxyCall(
+        address(mailToken),
+        abi.encodeWithSignature("transfer(address,uint256)", address(testers[0]), 100 * 1e18)
+    );
+    
+    // Now the bid should fail due to insufficient MAIL balance
+    try testers[3].proxyCall{value: 1 ether}(
+        address(market), abi.encodeWithSignature("placeETHBid(string)", "nomail")
+    ) { revert("Did not revert"); } catch {}
+}
 
     function s6_AcceptBidNotOwner() public {
         testers[0].proxyCall(address(names), abi.encodeWithSignature("mintName(string)", "notowner"));
@@ -415,8 +438,13 @@ MailNames.NameRecord memory rec = names.getNameRecords("alice");
         _approveMAIL(2, address(market));
         testers[2].proxyCall{value: 1 ether}(address(market), abi.encodeWithSignature("placeETHBid(string)", "notowner"));
         uint256 hash = uint256(keccak256(abi.encodePacked("notowner")));
-        try testers[1].proxyCall(address(market), abi.encodeWithSignature("acceptBid(uint256,bool,address,uint256)", hash, true, address(0), 0))
-        { revert("Did not revert"); } catch {}
+        
+        try testers[1].proxyCall(
+            address(names),
+            abi.encodeWithSignature("acceptMarketBid(uint256,bool,address,uint256)", hash, true, address(0), 0)
+        ) { 
+            revert("Did not revert"); 
+        } catch {}
     }
 
     function s7_ProcessSettlementEarly() public {
