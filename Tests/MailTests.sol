@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.6 (13/11/2025)
+// File Version: 0.0.8 (16/11/2025)
 // Changelog Summary:
+// - 16/11/2025: Fixed 2_3 normalization. 
+// - 16/11/2025: Increased ETH distribution in initiateTesters, added receive().
 // - 13/11/2025: Increased ETH amount in initiateTesters  to avoid out-of-gas issues in proxyCall{value: 1 ether}(...))
 // - 13/11/2025: Added pre-test unWarp() calls to p2_1TestETHBidSetup and s1_MintDuplicateName to reset any lingering time-warp state from previous test paths.
 // - 08/12/2025: Adjusted path_1 time warp to check warped time.
@@ -131,6 +133,9 @@ contract MailTests {
         _deployMocks();
         _configureMocks();
     }
+    
+    // NEW: Add receive function to accept ETH
+    receive() external payable {}
 
     // --- Deploy only mocks (MAIL and ERC20) ---
     function _deployMocks() internal {
@@ -189,15 +194,17 @@ function returnOwnership() external {
 
     function initiateTesters() public payable {
         require(msg.sender == tester, "Not tester");
-        require(msg.value == 5 ether, "Send 5 ETH"); // Updated to 5 ETH: 4 for testers, 1 retained
+        // CHANGED: Increased required ETH to 20
+        require(msg.value == 20 ether, "Send 20 ETH"); // 4 ETH * 4 testers + 4 ETH for MailTests
         for (uint i = 0; i < 4; i++) {
             MockMailTester t = new MockMailTester(address(this));
-            (bool s,) = address(t).call{value: 1 ether}("");
+            // CHANGED: Send 4 ETH to each tester for gas buffer
+            (bool s,) = address(t).call{value: 4 ether}("");
             require(s, "Fund failed");
             testers[i] = t;
 
-            mailToken.mint(address(t), 100 * 1e18);     // 100 MAIL
-            mockERC20.mint(address(t), 100 * 1e6);      // 100 MOCK
+            mailToken.mint(address(t), 100 * 1e18); // 100 MAIL
+            mockERC20.mint(address(t), 100 * 1e6); // 100 MOCK
         }
     }
 
@@ -301,10 +308,14 @@ MailNames.NameRecord memory rec = names.getNameRecords("alice");
     function p2_3TestTokenBid() public {
         _approveERC20(3, address(market));
         testers[3].proxyCall(
-            address(market), abi.encodeWithSignature("placeTokenBid(string,uint256,address)", "bob", 100 * 1e6, address(mockERC20))
+            address(market), 
+            // CHANGED: Pass the normalized amount '100' instead of the full amount '100 * 1e6'
+            abi.encodeWithSignature("placeTokenBid(string,uint256,address)", "bob", 100, address(mockERC20))
         );
         MailMarket.Bid memory bid = market.getNameBids("bob", false, address(mockERC20))[0];
         assert(bid.bidder == address(testers[3]));
+        // The contract correctly received 100 * 1e6, but the assertion should check the normalized amount
+        assert(bid.amount == 100); 
     }
 
     function p2_4TestAcceptBid() public {
