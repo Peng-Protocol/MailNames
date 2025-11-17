@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.31 (17/11/2025)
+// File Version: 0.0.32 (17/11/2025)
 // Changelog:
+// - 17/11/2025: Ensured $MAIL balance requirement in processSettlement, added helper functions , updated MailMarket interface for bid cancellation. 
 // - Adjusted settlement logic in _settleBid and processSettlement
 // - Adjusted post-grace settlement logic in acceptMarketBid.
 // - Added "transfer" function to allow MailMarket to transfer names during bid settlement.
@@ -52,6 +53,8 @@ interface IMailLocker {
 
 interface IMailMarket {
     function settleBid(uint256 _nameHash, uint256 _bidIndex, bool _isETH, address _token) external;
+    function getBidDetails(uint256 _nameHash, uint256 _bidIndex, bool _isETH, address _token) external view returns (address bidder, uint256 amount);
+    function cancelBid(uint256 _nameHash, uint256 _bidIndex, bool _isETH, address _token) external;
 }
 
 contract MailNames {
@@ -282,48 +285,82 @@ IMailLocker(mailLocker).depositLock(normalized, msg.sender, _now() + 365 days * 
             }
             // --- BUGGY LOGIC REMOVED FROM HERE 
         }
+        
+        // New helpers for processSettlement 
 
-// Changelog: 0.0.31 (17/10/2025) - moved pre/post-grace settlement logic
-        function processSettlement(uint256 _index) external {
-            require(_index < pendingSettlements.length, "Invalid index");
-    PendingSettlement memory settlement = pendingSettlements[_index];
-            require(_now() >= settlement.queueTime + 3 weeks, "Settlement not ready");
-
-            // --- FIX: Moved Logic ---
-            // 1. Settle the bid on MailMarket (transfers NFT, pays old owner)
-    IMailMarket(mailMarket).settleBid(settlement.nameHash, settlement.bidIndex, settlement.isETH, settlement.token);
-            
-            // 2. Get the new owner (who was just assigned by the call above)
-            address newOwner = ownerOf[nameHashToTokenId[settlement.nameHash]];
-
-            // 3. Reset the grace period for the new owner
-    NameRecord storage record = nameRecords[settlement.nameHash];
-            record.graceEnd = _now() + GRACE_PERIOD;
-            // We also must update allowanceEnd, otherwise they'll be in grace forever
-            record.allowanceEnd = _now() + ALLOWANCE_PERIOD;
-
-    emit SettlementProcessed(settlement.nameHash, newOwner);
-
-            // 4. Force the new owner to "check-in" by locking MAIL
-            // (This logic was moved from _settleBid)
-            uint256 queueLen = pendingCheckins.length - nextProcessIndex;
-            uint256 minReq = _calculateMinRequired(queueLen);
+function _calculateSettlementRequirements() private view returns (uint256 queueLen, uint256 minReq, uint256 fullMinReq) {
+    queueLen = pendingCheckins.length - nextProcessIndex;
+    minReq = _calculateMinRequired(queueLen);
     uint8 dec = IERC20(mailToken).decimals();
-            uint256 normMin = minReq / (10 ** dec);
-            
-            // Note: This require check is now on the *newOwner*
-            require(IERC20(mailToken).balanceOf(newOwner) >= normMin, "New owner insufficient MAIL");
-    IERC20(mailToken).transferFrom(newOwner, address(this), minReq);
-            IMailLocker(mailLocker).depositLock(normMin, newOwner, _now() + 365 days * 10);
-            uint256 waitDuration = _calculateWaitDuration(queueLen);
-            pendingCheckins.push(PendingCheckin(settlement.nameHash, newOwner, _now(), waitDuration));
-    emit QueueCheckInQueued(settlement.nameHash, newOwner, minReq, waitDuration);
-            // --- End of Moved Logic ---
+    fullMinReq = minReq * (10 ** dec);
+}
 
-            // 5. Swap and pop to remove processed settlement
+function _validateBidderMAILBalance(address bidder, uint256 requiredAmount) private view returns (bool) {
+    return IERC20(mailToken).balanceOf(bidder) >= requiredAmount;
+}
+
+function _executeSettlement(PendingSettlement memory settlement) private returns (address newOwner) {
+    IMailMarket(mailMarket).settleBid(settlement.nameHash, settlement.bidIndex, settlement.isETH, settlement.token);
+    newOwner = ownerOf[nameHashToTokenId[settlement.nameHash]];
+}
+
+function _updateNameRecordTimestamps(uint256 _nameHash) private {
+    NameRecord storage record = nameRecords[_nameHash];
+    record.graceEnd = _now() + GRACE_PERIOD;
+    record.allowanceEnd = _now() + ALLOWANCE_PERIOD;
+}
+
+function _lockBidderMAIL(address bidder, uint256 nameHash, uint256 minReq, uint256 fullMinReq) private {
+    IERC20(mailToken).transferFrom(bidder, address(this), fullMinReq);
+    IMailLocker(mailLocker).depositLock(minReq, bidder, _now() + 365 days * 10);
+    
+    uint256 queueLen = pendingCheckins.length - nextProcessIndex;
+    uint256 waitDuration = _calculateWaitDuration(queueLen);
+    pendingCheckins.push(PendingCheckin(nameHash, bidder, _now(), waitDuration));
+    emit QueueCheckInQueued(nameHash, bidder, fullMinReq, waitDuration);
+}
+
+function _removePendingSettlement(uint256 _index) private {
     pendingSettlements[_index] = pendingSettlements[pendingSettlements.length - 1];
     pendingSettlements.pop();
-        }
+}
+
+// Added $MAIL balance check and penalty. 
+function processSettlement(uint256 _index) external {
+    require(_index < pendingSettlements.length, "Invalid index");
+    PendingSettlement memory settlement = pendingSettlements[_index];
+    require(_now() >= settlement.queueTime + 3 weeks, "Settlement not ready");
+
+    // Get bidder details and calculate requirements
+    (address bidder, ) = IMailMarket(mailMarket).getBidDetails(
+        settlement.nameHash, 
+        settlement.bidIndex, 
+        settlement.isETH, 
+        settlement.token
+    );
+    
+    (uint256 queueLen, uint256 minReq, uint256 fullMinReq) = _calculateSettlementRequirements();
+    
+    // Check if bidder has sufficient MAIL
+    if (!_validateBidderMAILBalance(bidder, fullMinReq)) {
+        // Cancel bid with 1% penalty instead of reverting
+        IMailMarket(mailMarket).cancelBid(settlement.nameHash, settlement.bidIndex, settlement.isETH, settlement.token);
+        _removePendingSettlement(_index);
+        return; // Exit gracefully without settling
+    }
+    
+    // Execute settlement
+    address newOwner = _executeSettlement(settlement);
+    _updateNameRecordTimestamps(settlement.nameHash);
+    
+    emit SettlementProcessed(settlement.nameHash, newOwner);
+    
+    // Lock bidder's MAIL and queue check-in
+    _lockBidderMAIL(newOwner, settlement.nameHash, minReq, fullMinReq);
+    
+    // Remove processed settlement
+    _removePendingSettlement(_index);
+}
 
 // Changelog: 0.0.30 (17/11/2025) - Allowed post-grace settlement. 
     function acceptMarketBid(uint256 _nameHash, bool _isETH, address _token, uint256 _bidIndex) external {

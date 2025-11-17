@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.8 (13/11/2025)
+// File Version: 0.0.9 (17/11/2025)
 // Changelog:
+// - 17/11/2025: Added getBidDetails and cancelBid (MailNames only). 
 // - 13/11/2035: Removed "tokenId != 0" in various functions , replaced with other suitable checks. 
 // - 07/11/2025: Added time-warp system (currentTime, isWarped, warp(), unWarp(), _now()) to IMailNames, MailLocker, MailMarket for VM testing consistency with TrustlessFund
 // - 0.0.6 (07/10): Updated checkTopBidder to close invalid top bid, refund, and clear data
@@ -176,22 +177,49 @@ function _now() internal view returns (uint256) {
             IIERC20(_token).transfer(_oldOwner, _amount * (10 ** IIERC20(_token).decimals()));
         }
     }
+    
+function cancelBid(uint256 _nameHash, uint256 _bidIndex, bool _isETH, address _token) external {
+    require(msg.sender == mailNames, "Only MailNames");
+    Bid memory bid = _isETH ? ethBids[_nameHash][_bidIndex] : tokenBids[_nameHash][_token][_bidIndex];
+    
+    // Calculate penalty: 1% burn, 99% refund
+    uint256 refundAmount = (bid.amount * 99) / 100;
+    uint256 burnAmount = bid.amount - refundAmount;
+    
+    if (_isETH) {
+        payable(bid.bidder).transfer(refundAmount);
+        // Burn by sending to dead address
+        payable(address(0xdead)).transfer(burnAmount);
+    } else {
+        IIERC20(_token).transfer(bid.bidder, refundAmount * (10 ** IIERC20(_token).decimals()));
+        IIERC20(_token).transfer(address(0xdead), burnAmount * (10 ** IIERC20(_token).decimals()));
+    }
+    
+    bidderActiveBids[bid.bidder]--;
+    
+    Bid[100] storage bidsArray = _isETH ? ethBids[_nameHash] : tokenBids[_nameHash][_token];
+    _removeBidFromArray(bidsArray, _bidIndex);
+    
+    emit BidClosed(_nameHash, bid.bidder, bid.amount, _isETH);
+}
 
-// (0.0.8) Removed "tokenId != 0" check, replaced with ownership check
-    function _validateBidRequirements(string memory _name, uint256 _bidAmount) private view returns (BidValidation memory validation) {
+function _validateBidRequirements(string memory _name, uint256 _bidAmount) private view returns (BidValidation memory validation) {
     validation.nameHash = _stringToHash(_name);
     validation.tokenId = IMailNames(mailNames).nameHashToTokenId(validation.nameHash);
     
-    // Check if the owner is non-zero, which works for tokenId 0
     require(IMailNames(mailNames).ownerOf(validation.tokenId) != address(0), "Name not minted");
-
-require(_bidAmount > 0, "Invalid bid amount");
+    require(_bidAmount > 0, "Invalid bid amount");
+    
     validation.queueLen = 0;
-    validation.minReq = _calculateMinRequired(validation.queueLen) * (bidderActiveBids[msg.sender] + 1); // Scale by user's bids
+    validation.minReq = _calculateMinRequired(validation.queueLen) * (bidderActiveBids[msg.sender] + 1);
     uint8 dec = IIERC20(mailToken).decimals();
-    validation.normMin = validation.minReq / (10 ** dec);
-    require(IIERC20(mailToken).balanceOf(msg.sender) >= validation.normMin, "Insufficient MAIL");
+    
+    // Fix: Check balance against full amount with decimals, not normalized
+    uint256 fullMinReq = validation.minReq * (10 ** dec);
+    require(IIERC20(mailToken).balanceOf(msg.sender) >= fullMinReq, "Insufficient MAIL");
     require(_bidAmount >= validation.minReq, "Bid below min lock");
+    
+    validation.normMin = validation.minReq; // Store normalized for later use
 }
 
     function _handleTokenTransfer(address _token, uint256 _amount) private returns (uint256 receivedAmount) {
@@ -304,6 +332,11 @@ function getBidderBids(string memory _name, address _bidder, bool _isETH, addres
             index++;
         }
     }
+}
+
+function getBidDetails(uint256 _nameHash, uint256 _bidIndex, bool _isETH, address _token) external view returns (address bidder, uint256 amount) {
+    Bid memory bid = _isETH ? ethBids[_nameHash][_bidIndex] : tokenBids[_nameHash][_token][_bidIndex];
+    return (bid.bidder, bid.amount);
 }
 
     function getNameBids(string memory _name, bool _isETH, address _token) external view returns (Bid[100] memory nameBids) {

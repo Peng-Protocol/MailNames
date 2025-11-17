@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.13 (17/11/2025)
+// File Version: 0.0.14 (17/11/2025)
 // Changelog Summary:
+// - 17/11/2025: Added approval in 2b_4.
 // - 17/11/2025: Added queue bid settlement in 2b_2.
 // - 17/11/2025: Adjusted p2a and 2b tests to distinguish focus on token bid (pre expiration) vs eth bid (post expiration), added allowance in 2a. 
 // - 16/11/2025: Adjusted s5 to transfer tester 3's $MAIL to ensure invalid bid fails. 
@@ -366,6 +367,9 @@ function p2b_3TestQueueSettlement() public {
 }
 
 function p2b_4TestPostGraceSettlement() public {
+    // Add approval for testers[1] before processing settlement
+    _approveMAIL(1, address(names));
+    
     names.warp(names.currentTime() + THREE_WEEKS + 1);
     MailNames.PendingSettlement[] memory pending = names.getPendingSettlements("charlie", 0, 10);
     require(pending.length > 0, "No pending settlements");
