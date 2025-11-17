@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.29 (17/11/2025)
+// File Version: 0.0.31 (17/11/2025)
 // Changelog:
+// - Adjusted settlement logic in _settleBid and processSettlement
+// - Adjusted post-grace settlement logic in acceptMarketBid.
 // - Added "transfer" function to allow MailMarket to transfer names during bid settlement.
 // - ++ v0.0.22 in acceptMarketBid
 // - ++ v0.0.22 in _processNextCheckin
@@ -260,64 +262,89 @@ uint8 decimals = IERC20(mailToken).decimals();
 IMailLocker(mailLocker).depositLock(normalized, msg.sender, _now() + 365 days * 10);
     }
 
-         // Changelog: 0.0.17 (06/10/2025) - Queues post-grace settlements, handles checkin
+// Changelog: 0.0.31 (17/10/2025) - Adjusted pre-grace and post-grace settlement logic. 
         function _settleBid(uint256 _nameHash, uint256 _bidIndex, bool _isETH, address _token) private {
             SettlementData memory settlement;
-            settlement.nameHash = _nameHash;
+    settlement.nameHash = _nameHash;
             settlement.tokenId = nameHashToTokenId[_nameHash];
             settlement.oldOwner = ownerOf[settlement.tokenId];
             settlement.postGrace = _now() > nameRecords[_nameHash].graceEnd;
 
-            if (settlement.postGrace) {
+    if (settlement.postGrace) {
+                // --- FIX ---
+                // This block should ONLY queue the settlement.
+                // The rest of the logic (grace reset, check-in)
+                // is moved to processSettlement().
                 pendingSettlements.push(PendingSettlement(_nameHash, _bidIndex, _isETH, _token, _now()));
             } else {
-                IMailMarket(mailMarket).settleBid(_nameHash, _bidIndex, _isETH, _token);
+                // Pre-grace: Settle immediately
+        IMailMarket(mailMarket).settleBid(_nameHash, _bidIndex, _isETH, _token);
             }
-
-            if (settlement.postGrace) {
-                NameRecord storage record = nameRecords[_nameHash];
-                record.graceEnd = _now() + GRACE_PERIOD;
-                emit GraceReset(_nameHash, ownerOf[settlement.tokenId]);
-                uint256 queueLen = pendingCheckins.length - nextProcessIndex;
-                uint256 minReq = _calculateMinRequired(queueLen);
-                uint8 dec = IERC20(mailToken).decimals();
-                uint256 normMin = minReq / (10 ** dec);
-                require(IERC20(mailToken).balanceOf(ownerOf[settlement.tokenId]) >= normMin, "New owner insufficient MAIL");
-                IERC20(mailToken).transferFrom(ownerOf[settlement.tokenId], address(this), minReq);
-                IMailLocker(mailLocker).depositLock(normMin, ownerOf[settlement.tokenId], _now() + 365 days * 10);
-                uint256 waitDuration = _calculateWaitDuration(queueLen);
-                pendingCheckins.push(PendingCheckin(_nameHash, ownerOf[settlement.tokenId], _now(), waitDuration));
-                emit QueueCheckInQueued(_nameHash, ownerOf[settlement.tokenId], minReq, waitDuration);
-            }
+            // --- BUGGY LOGIC REMOVED FROM HERE 
         }
 
-        // Changelog: 0.0.14 (06/10/2025) - added to Process queued settlements after 3 weeks
+// Changelog: 0.0.31 (17/10/2025) - moved pre/post-grace settlement logic
         function processSettlement(uint256 _index) external {
             require(_index < pendingSettlements.length, "Invalid index");
-            PendingSettlement memory settlement = pendingSettlements[_index];
+    PendingSettlement memory settlement = pendingSettlements[_index];
             require(_now() >= settlement.queueTime + 3 weeks, "Settlement not ready");
-            IMailMarket(mailMarket).settleBid(settlement.nameHash, settlement.bidIndex, settlement.isETH, settlement.token);
-            NameRecord storage record = nameRecords[settlement.nameHash];
-            record.graceEnd = _now() + GRACE_PERIOD; // Reset secondary grace period
-            emit SettlementProcessed(settlement.nameHash, ownerOf[nameHashToTokenId[settlement.nameHash]]);
 
-            // Swap and pop to remove processed settlement
-            pendingSettlements[_index] = pendingSettlements[pendingSettlements.length - 1];
-            pendingSettlements.pop();
+            // --- FIX: Moved Logic ---
+            // 1. Settle the bid on MailMarket (transfers NFT, pays old owner)
+    IMailMarket(mailMarket).settleBid(settlement.nameHash, settlement.bidIndex, settlement.isETH, settlement.token);
+            
+            // 2. Get the new owner (who was just assigned by the call above)
+            address newOwner = ownerOf[nameHashToTokenId[settlement.nameHash]];
+
+            // 3. Reset the grace period for the new owner
+    NameRecord storage record = nameRecords[settlement.nameHash];
+            record.graceEnd = _now() + GRACE_PERIOD;
+            // We also must update allowanceEnd, otherwise they'll be in grace forever
+            record.allowanceEnd = _now() + ALLOWANCE_PERIOD;
+
+    emit SettlementProcessed(settlement.nameHash, newOwner);
+
+            // 4. Force the new owner to "check-in" by locking MAIL
+            // (This logic was moved from _settleBid)
+            uint256 queueLen = pendingCheckins.length - nextProcessIndex;
+            uint256 minReq = _calculateMinRequired(queueLen);
+    uint8 dec = IERC20(mailToken).decimals();
+            uint256 normMin = minReq / (10 ** dec);
+            
+            // Note: This require check is now on the *newOwner*
+            require(IERC20(mailToken).balanceOf(newOwner) >= normMin, "New owner insufficient MAIL");
+    IERC20(mailToken).transferFrom(newOwner, address(this), minReq);
+            IMailLocker(mailLocker).depositLock(normMin, newOwner, _now() + 365 days * 10);
+            uint256 waitDuration = _calculateWaitDuration(queueLen);
+            pendingCheckins.push(PendingCheckin(settlement.nameHash, newOwner, _now(), waitDuration));
+    emit QueueCheckInQueued(settlement.nameHash, newOwner, minReq, waitDuration);
+            // --- End of Moved Logic ---
+
+            // 5. Swap and pop to remove processed settlement
+    pendingSettlements[_index] = pendingSettlements[pendingSettlements.length - 1];
+    pendingSettlements.pop();
         }
 
-    // Changelog: 0.0.28 (13/11/2025) - Removed "tokenId != 0" check, replaced with "nameHash != 0"
+// Changelog: 0.0.30 (17/11/2025) - Allowed post-grace settlement. 
     function acceptMarketBid(uint256 _nameHash, bool _isETH, address _token, uint256 _bidIndex) external {
         // 1. Check for existence first
         require(nameRecords[_nameHash].nameHash != 0, "Name not minted");
-
-        // 2. Check for ownership (buggy 'tokenId != 0' removed)
-        uint256 tokenId = nameHashToTokenId[_nameHash];
-require(ownerOf[tokenId] == msg.sender, "Not owner");
         
-        // 3. Proceed with logic
         NameRecord storage record = nameRecords[_nameHash];
-        require(_now() <= record.allowanceEnd, "Allowance expired");
+        uint256 tokenId = nameHashToTokenId[_nameHash];
+
+        // --- LOGIC FIX ---
+        // Check if the name is still within its allowance period
+        if (_now() <= record.allowanceEnd) {
+            // PRE-EXPIRATION: Only the owner can accept a bid.
+            require(ownerOf[tokenId] == msg.sender, "Not owner"); 
+        } else {
+            // POST-EXPIRATION: Anyone can trigger settlement, 
+            // but only after the grace period has ended.
+            require(_now() > record.graceEnd, "Settlement still in grace period");
+        }
+        
+        // 3. Proceed with settlement logic
         _settleBid(_nameHash, _bidIndex, _isETH, _token);
     }
 

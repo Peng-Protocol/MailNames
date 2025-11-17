@@ -349,17 +349,20 @@ function p2b_2TestPostExpirationETHBid() public {
 
     MailMarket.Bid memory bid = market.getNameBids("charlie", true, address(0))[0];
     assert(bid.bidder == address(testers[1]) && bid.amount == 2 ether);
-
-    // The owner (testers[0]) must accept the bid to trigger _settleBid
-    testers[0].proxyCall(
-        address(names),
-        abi.encodeWithSignature("acceptMarketBid(uint256,bool,address,uint256)", p2bNameHash, true, address(0), 0)
-    );
 }
 
 function p2b_3TestQueueSettlement() public {
-    MailNames.PendingSettlement[] memory pending = names.getPendingSettlements("charlie", 0, 10);
-    assert(pending.length > 0 && pending[0].queueTime > 0);
+    // Now that the name is post-grace, *anyone* (e.g., testers[2]) can 
+    // call acceptMarketBid to queue the top bid for settlement.
+    // We accept bid index 0 (the top bid) placed by testers[1].
+    testers[2].proxyCall(
+        address(names),
+        abi.encodeWithSignature("acceptMarketBid(uint256,bool,address,uint256)", p2bNameHash, true, address(0), 0)
+    );
+
+    // This assertion will now pass, as the call above populated the queue
+    MailNames.PendingSettlement[] memory pending = names.getPendingSettlements("charlie", 0, 10); 
+    assert(pending.length > 0 && pending[0].queueTime > 0); 
 }
 
 function p2b_4TestPostGraceSettlement() public {
