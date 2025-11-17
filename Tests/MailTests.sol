@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.12 (17/11/2025)
+// File Version: 0.0.13 (17/11/2025)
 // Changelog Summary:
-// - 17/11/2025: Adjusted  p2a and 2b tests to finish focus on token bid (pre expiration) vs eth bid (post expiration), added allowance in 2a. 
+// - 17/11/2025: Added queue bid settlement in 2b_2.
+// - 17/11/2025: Adjusted p2a and 2b tests to distinguish focus on token bid (pre expiration) vs eth bid (post expiration), added allowance in 2a. 
 // - 16/11/2025: Adjusted s5 to transfer tester 3's $MAIL to ensure invalid bid fails. 
 // - 16/11/2025: Split path 2 into p2a (pre-expiration) and p2b (post-expiration) to avoid time warp conflicts
 // - 16/11/2025: Fixed 2_4 and s6 call target, mailNames.acceptMarketBid not mailMarket.acceptBid. 
@@ -345,9 +346,15 @@ function p2b_1TestPostExpirationSetup() public {
 function p2b_2TestPostExpirationETHBid() public {
     _approveMAIL(1, address(market));
     testers[1].proxyCall{value: 2 ether}(address(market), abi.encodeWithSignature("placeETHBid(string)", "charlie"));
-    
+
     MailMarket.Bid memory bid = market.getNameBids("charlie", true, address(0))[0];
     assert(bid.bidder == address(testers[1]) && bid.amount == 2 ether);
+
+    // The owner (testers[0]) must accept the bid to trigger _settleBid
+    testers[0].proxyCall(
+        address(names),
+        abi.encodeWithSignature("acceptMarketBid(uint256,bool,address,uint256)", p2bNameHash, true, address(0), 0)
+    );
 }
 
 function p2b_3TestQueueSettlement() public {

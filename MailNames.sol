@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.28 (13/11/2025)
+// File Version: 0.0.29 (17/11/2025)
 // Changelog:
+// - Added "transfer" function to allow MailMarket to transfer names during bid settlement.
 // - ++ v0.0.22 in acceptMarketBid
 // - ++ v0.0.22 in _processNextCheckin
 // - 09/11/2025: Added max approval when setting locker.
@@ -412,6 +413,23 @@ require(ownerOf[tokenId] == msg.sender, "Not owner");
         pendingCheckins.push(PendingCheckin(_nameHash, msg.sender, _now(), waitDuration));
         emit QueueCheckInQueued(_nameHash, msg.sender, minRequired, waitDuration);
         this.advance();
+    }
+
+    // This function is called by MailMarket.settleBid()
+    // It bypasses normal transfer auth
+    // Owner already authorized the action via acceptMarketBid()
+    function transfer(uint256 _tokenId, address _to) external {
+        require(msg.sender == mailMarket, "Only MailMarket");
+        require(_to != address(0), "Invalid to");
+        address from = ownerOf[_tokenId];
+        require(from != address(0), "Token not minted");
+        
+        // bypass because the market is trusted
+        _balances[from]--;
+        _balances[_to]++;
+        ownerOf[_tokenId] = _to;
+        delete getApproved[_tokenId];
+        emit Transfer(from, _to, _tokenId);
     }
 
 function transferName(uint256 _nameHash, address _newOwner) external {
