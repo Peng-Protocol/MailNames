@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.11 (16/11/2025)
+// File Version: 0.0.12 (17/11/2025)
 // Changelog Summary:
+// - 17/11/2025: Adjusted  p2a and 2b tests to finish focus on token bid (pre expiration) vs eth bid (post expiration), added allowance in 2a. 
 // - 16/11/2025: Adjusted s5 to transfer tester 3's $MAIL to ensure invalid bid fails. 
 // - 16/11/2025: Split path 2 into p2a (pre-expiration) and p2b (post-expiration) to avoid time warp conflicts
 // - 16/11/2025: Fixed 2_4 and s6 call target, mailNames.acceptMarketBid not mailMarket.acceptBid. 
@@ -292,95 +293,92 @@ contract MailTests {
         assert(locker.getTotalLocked(address(testers[1])) == deps[0].amount);
     }
 
-    // --- p2a: Pre-Expiration Bidding (Chained) ---
-    function p2a_1TestPreExpirationSetup() public {
-        // Reset any lingering time-warp from previous test paths
-        if (names.isWarped()) names.unWarp();
-        if (locker.isWarped()) locker.unWarp();
-        if (market.isWarped()) market.unWarp();
+// --- p2a: Pre-Expiration Token Bid Acceptance (Chained) ---
+function p2a_1TestPreExpirationSetup() public {
+    // Reset any lingering time-warp from previous test paths
+    if (names.isWarped()) names.unWarp();
+    if (locker.isWarped()) locker.unWarp();
+    if (market.isWarped()) market.unWarp();
 
-        testers[0].proxyCall(address(names), abi.encodeWithSignature("mintName(string)", "bob"));
-        p2aNameHash = uint256(keccak256(abi.encodePacked("bob")));
-        p2aTokenId = names.nameHashToTokenId(p2aNameHash);
-        // NO TIME WARP - name is still valid
-    }
+    testers[0].proxyCall(address(names), abi.encodeWithSignature("mintName(string)", "bob"));
+    p2aNameHash = uint256(keccak256(abi.encodePacked("bob")));
+    p2aTokenId = names.nameHashToTokenId(p2aNameHash);
+    // NO TIME WARP - name is still valid
+}
 
-    function p2a_2TestPreExpirationETHBid() public {
-        _approveMAIL(2, address(market));
-        testers[2].proxyCall{value: 1 ether}(address(market), abi.encodeWithSignature("placeETHBid(string)", "bob"));
-        MailMarket.Bid memory bid = market.getNameBids("bob", true, address(0))[0];
-        assert(bid.bidder == address(testers[2]) && bid.amount == 1 ether);
-    }
+function p2a_2TestPreExpirationTokenBid() public {
+    _approveMAIL(2, address(market));
+    _approveERC20(2, address(market));
+    testers[2].proxyCall(
+        address(market), 
+        abi.encodeWithSignature("placeTokenBid(string,uint256,address)", "bob", 10, address(mockERC20))
+    );
+    MailMarket.Bid memory bid = market.getNameBids("bob", false, address(mockERC20))[0];
+    assert(bid.bidder == address(testers[2]));
+    assert(bid.amount == 10); 
+}
 
-    function p2a_3TestPreExpirationTokenBid() public {
-        _approveERC20(3, address(market));
-        testers[3].proxyCall(
-            address(market), 
-            abi.encodeWithSignature("placeTokenBid(string,uint256,address)", "bob", 100, address(mockERC20))
-        );
-        MailMarket.Bid memory bid = market.getNameBids("bob", false, address(mockERC20))[0];
-        assert(bid.bidder == address(testers[3]));
-        assert(bid.amount == 100); 
-    }
+function p2a_3TestAcceptTokenBidPreExpiration() public {
+    // Accept token bid BEFORE expiration (owner-initiated)
+    testers[0].proxyCall(
+        address(names),
+        abi.encodeWithSignature("acceptMarketBid(uint256,bool,address,uint256)", p2aNameHash, false, address(mockERC20), 0)
+    );
+    assert(names.ownerOf(p2aTokenId) == address(testers[2]));
+}
 
-    function p2a_4TestAcceptBidPreExpiration() public {
-        // Accept bid BEFORE expiration (owner-initiated)
-        testers[0].proxyCall(
-            address(names),
-            abi.encodeWithSignature("acceptMarketBid(uint256,bool,address,uint256)", p2aNameHash, true, address(0), 0)
-        );
-        assert(names.ownerOf(p2aTokenId) == address(testers[2]));
-    }
+// --- p2b: Post-Expiration ETH Bid Auto-Settlement (Chained) ---
+function p2b_1TestPostExpirationSetup() public {
+    // Reset any lingering time-warp from previous test paths
+    if (names.isWarped()) names.unWarp();
+    if (locker.isWarped()) locker.unWarp();
+    if (market.isWarped()) market.unWarp();
 
-    // --- p2b: Post-Expiration Bidding & Settlement (Chained) ---
-    function p2b_1TestPostExpirationSetup() public {
-        // Reset any lingering time-warp from previous test paths
-        if (names.isWarped()) names.unWarp();
-        if (locker.isWarped()) locker.unWarp();
-        if (market.isWarped()) market.unWarp();
+    testers[0].proxyCall(address(names), abi.encodeWithSignature("mintName(string)", "charlie"));
+    p2bNameHash = uint256(keccak256(abi.encodePacked("charlie")));
+    p2bTokenId = names.nameHashToTokenId(p2bNameHash);
+    
+    // WARP past expiration AND grace period
+    names.warp(block.timestamp + ONE_YEAR + GRACE + 1);
+}
 
-        testers[0].proxyCall(address(names), abi.encodeWithSignature("mintName(string)", "charlie"));
-        p2bNameHash = uint256(keccak256(abi.encodePacked("charlie")));
-        p2bTokenId = names.nameHashToTokenId(p2bNameHash);
-        
-        // WARP past expiration AND grace period
-        names.warp(block.timestamp + ONE_YEAR + GRACE + 1);
-    }
+function p2b_2TestPostExpirationETHBid() public {
+    _approveMAIL(1, address(market));
+    testers[1].proxyCall{value: 2 ether}(address(market), abi.encodeWithSignature("placeETHBid(string)", "charlie"));
+    
+    MailMarket.Bid memory bid = market.getNameBids("charlie", true, address(0))[0];
+    assert(bid.bidder == address(testers[1]) && bid.amount == 2 ether);
+}
 
-    function p2b_2TestPostExpirationBid() public {
-        _approveMAIL(1, address(market));
-        testers[1].proxyCall{value: 2 ether}(address(market), abi.encodeWithSignature("placeETHBid(string)", "charlie"));
-    }
+function p2b_3TestQueueSettlement() public {
+    MailNames.PendingSettlement[] memory pending = names.getPendingSettlements("charlie", 0, 10);
+    assert(pending.length > 0 && pending[0].queueTime > 0);
+}
 
-    function p2b_3TestQueueSettlement() public {
-        MailNames.PendingSettlement[] memory pending = names.getPendingSettlements("charlie", 0, 10);
-        assert(pending.length > 0 && pending[0].queueTime > 0);
-    }
-
-    function p2b_4TestPostGraceSettlement() public {
-        names.warp(names.currentTime() + THREE_WEEKS + 1);
-        MailNames.PendingSettlement[] memory pending = names.getPendingSettlements("charlie", 0, 10);
-        require(pending.length > 0, "No pending settlements");
-        
-        uint256 settlementIndex = 0;
-        bool found = false;
-        
-        for (uint256 i = 0; i < 100; i++) {
-            try names.getSettlementById(i) returns (MailNames.PendingSettlement memory s) {
-                if (s.nameHash == p2bNameHash) {
-                    settlementIndex = i;
-                    found = true;
-                    break;
-                }
-            } catch {
+function p2b_4TestPostGraceSettlement() public {
+    names.warp(names.currentTime() + THREE_WEEKS + 1);
+    MailNames.PendingSettlement[] memory pending = names.getPendingSettlements("charlie", 0, 10);
+    require(pending.length > 0, "No pending settlements");
+    
+    uint256 settlementIndex = 0;
+    bool found = false;
+    
+    for (uint256 i = 0; i < 100; i++) {
+        try names.getSettlementById(i) returns (MailNames.PendingSettlement memory s) {
+            if (s.nameHash == p2bNameHash) {
+                settlementIndex = i;
+                found = true;
                 break;
             }
+        } catch {
+            break;
         }
-        
-        require(found, "Settlement not found");
-        names.processSettlement(settlementIndex);
-        assert(names.ownerOf(p2bTokenId) == address(testers[1]));
     }
+    
+    require(found, "Settlement not found");
+    names.processSettlement(settlementIndex);
+    assert(names.ownerOf(p2bTokenId) == address(testers[1]));
+}
 
     // --- s: Sad Paths (Independent) ---
     function s1_MintDuplicateName() public {

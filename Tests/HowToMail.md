@@ -2,7 +2,7 @@
 
 ## Prerequisites
 - Ensure `MailNames.sol`, `MailLocker.sol`, `MailMarket.sol`, `MockMAILToken.sol`, `MockMailTester.sol`, and `MailTests.sol` are in your Remix workspace.
-- Place core contracts in main directory .
+- Place core contracts in main directory.
 - Place mocks and `MailTests.sol` in `./Tests`.
 
 ## Steps
@@ -20,9 +20,9 @@
    - Paste the **exact addresses** of the deployed `MailNames`, `MailLocker`, `MailMarket` contracts.
    - This will:
      - Assign the instances to `MailTests`
-     - Configure token and cross-references 
-   - Transfer ownership of all three subject contracts to `MailTests`.
-9. Call `initiateTesters()` with **5 ETH** (value field).
+     - Configure token and cross-references
+   - Ownership transfer is **not** attempted; perform manually before calling.
+9. Call `initiateTesters()` with **20 ETH** (value field).
 10. **Path 1 – Basic Lifecycle**:
     - `p1_1TestMint()`
     - `p1_2TestSubname()`
@@ -32,21 +32,22 @@
     - `p1_6TestQueueCheckIn()`
     - `p1_7TestProcessCheckIn()`
     - `p1_8TestLockerView()`
-11. **Path 2 – Bidding & Settlement** ():
-    - `p2_1TestETHBidSetup()`
-    - `p2_2TestETHBid()`
-    - `p2_3TestTokenBid()`
-    - `p2_4TestAcceptBid()`
-    - `p2_5TestPostGraceBidSetup()`
-    - `p2_6TestQueueSettlement()`
-    - `p2_7TestPostGraceSettlement()`
-12. **Sad Path Tests** ():
+11. **Path 2a – Bidding & Settlement (Pre-Expiration)**:
+    - `p2a_1TestPreExpirationBidSetup()`
+    - `p2a_2TestPreExpirationTokenBid()`
+    - `p2a_3TestAcceptTokenBidPreExpiration()`
+12. **Path 2b – Bidding & Settlement (Post-Expiration)**:
+    - `p2b_1TestPostExpirationSetup()`
+    - `p2b_2TestPostExpirationETHBid()`
+    - `p2b_3TestQueueSettlement()`
+    - `p2b_4TestPostGraceSettlement()`
+13. **Sad Path Tests** (Independent):
     - `s1_MintDuplicateName()`
     - `s2_MintInvalidName()`
     - `s3_NonOwnerTransfer()`
-    - `s4_CheckInBeforeExpiration()`
+    - `s4_CheckInSecondBeforeExpiration()`
     - `s5_BidWithoutMAIL()`
-    - `s6_AcceptBidNotOwner()`
+    - `s6_BidAcceptNotOwner()`
     - `s7_ProcessSettlementEarly()`
     - `s8_DoubleCheckIn()`
     - `s9_WithdrawLockedMAIL()`
@@ -61,7 +62,7 @@
 ### 7. `initiateTesters()`
 - **Purpose**: Deploy 4 proxy tester contracts to simulate real users. 
 - **Action**: Each tester receives:
-  - 1 ETH (for gas/bids)
+  - 4 ETH (for gas/bids)
   - **100 MAIL** (18 decimals)
   - **100 MOCK** (6 decimals)
 - **Expected Outcome**:
@@ -117,36 +118,44 @@ Each step builds on the previous one using shared state (`p1NameHash`, `p1TokenI
 
 ---
 
-### 9. **Path 2 – Bidding & Settlement (State is Chained)**
-Builds on new name "bob", then "charlie".
+### 9. **Path 2a – Bidding & Settlement (Pre-Expiration, State is Chained)**
+Builds on new name "bob".
 
-- **`p2_1TestETHBidSetup()`**
-  - **Action**: Mint "bob", warp past grace
-  - **Expected**: Name expired, ready for takeover
+- **`p2a_1TestPreExpirationBidSetup()`**
+  - **Action**: Mint "bob", warp to just before expiration
+  - **Expected**: Name active, ready for pre-expiration bids
 
-- **`p2_2TestETHBid()`**
-  - **Action**: tester[2] places 1 ETH bid
-  - **Expected**: Bid appears in `getNameBids("bob", true, ...)[0]`
-
-- **`p2_3TestTokenBid()`**
-  - **Action**: tester[3] bids **100 MOCK** (100% balance, 6 decimals)
+- **`p2a_2TestPreExpirationTokenBid()`**
+  - **Action**: tester[3] bids **10 MOCK** (10% balance, 6 decimals)
   - **Expected**: Bid stored under `mockERC20`
 
-- **`p2_4TestAcceptBid()`**
-  - **Action**: Owner accepts ETH bid
+- **`p2a_3TestAcceptTokenBidPreExpiration()`**
+  - **Action**: Owner accepts token bid via `acceptMarketBid`
   - **Expected**: Ownership → bidder, funds to old owner
 
-- **`p2_5TestPostGraceBidSetup()`**
-  - **Action**: Mint "charlie", warp, place 2 ETH bid post-grace
+---
+
+### 10. **Path 2b – Bidding & Settlement (Post-Expiration, State is Chained)**
+Builds on new name "charlie".
+
+- **`p2b_1TestPostExpirationSetup()`**
+  - **Action**: Mint "charlie", warp past grace
+  - **Expected**: Name expired, ready for takeover
+
+- **`p2b_2TestPostExpirationETHBid()`**
+  - **Action**: Place 2 ETH bid post-grace
   - **Expected**: Bid queued for settlement
 
-- **`p2_6TestQueueSettlement()`**
-  - **Action**: Verify `pendingSettlements` populated
-  - **Expected**: `getPendingSettlements("charlie", ...)` returns queued bid
+- **`p2b_3TestQueueSettlement()`**
+  - **Action**:  Checks bid state.
+  - **Expected**: Active bids queued
 
-- **`p2_7TestPostGraceSettlement()`**
+- **`p2b_4TestPostGraceSettlement()`**
   - **Action**: Warp 3 weeks → `processSettlement(index)`
   - **Expected**: Ownership transferred to highest bidder
+  
+### 11. **Sad Paths**
+Attempts to call various functions incorrectly, expecting them to fail. 
 
 ---
 
@@ -164,16 +173,7 @@ Builds on new name "bob", then "charlie".
   - `getUserDeposits(user, step, max)`
   - `getNameBids(name, isETH, token)`
 
-- **Redeploy for Sad Paths**:
-  - Clean state avoids interference.
-  - Run `setMailContracts(...)` + `initiateTesters()` again after redeploy.
-
-- **Events to Watch**:
-  - `NameMinted`, `SubnameMinted`, `RecordsUpdated`
-  - `BidPlaced`, `BidSettled`, `CheckInProcessed`, `SettlementProcessed`
-  - `MailContractsSet`, `OwnershipTransferFailed` (if ownership transfer skipped)
-
 - **Ownership Transfer**:
-  - `setMailContracts()` attempts to transfer ownership of `MailNames`, `MailLocker`, `MailMarket` to `MailTests`.
-  - If any transfer fails (e.g. already transferred), `OwnershipTransferFailed` is emitted — **non-critical**.
-  - This allows `MailTests` to use `warp()` and `advance()` safely.
+  - `setMailContracts()` **does not** transfer ownership of `MailNames`, `MailLocker`, `MailMarket` to `MailTests`.
+  - Perform manually before calling.
+  - `OwnershipTransferFailed` is **not** emitted; failures are silent/non-critical.
