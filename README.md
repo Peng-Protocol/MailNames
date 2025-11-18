@@ -1,6 +1,6 @@
 # MailNames
-**Version**: 0.0.21
-**Date**: 07/11/2025  
+**Version**: 0.0.34  
+**Date**: 18/11/2025  
 **SPDX-License-Identifier**: BSL 1.1 - Peng Protocol 2025  
 **Solidity Version**: ^0.8.2  
 
@@ -84,6 +84,7 @@ MailNames is the primary name system for Chainmail (link unavailable).
 - `mailLocker`: address (MailLocker contract).
 - `mailMarket`: address (MailMarket contract).
 - `currentTime`: uint256 (warp state).
+- `checkInCost`: uint256 = 5e17 (0.5 $MAIL, adjustable).
 - `isWarped`: bool (warp flag).
 - `ALLOWANCE_PERIOD`: 365 days.
 - `GRACE_PERIOD`: 7 days.
@@ -101,14 +102,13 @@ MailNames is the primary name system for Chainmail (link unavailable).
 - **Effects**: Sets `NameRecord`, maps `tokenIdToNameHash`/`nameHashToTokenId`/`ownerOf`/`_balances`, pushes to `allNameHashes`, emits `NameMinted`/`Transfer`.
 
 ### queueCheckIn(uint256 _nameHash)
-- **Purpose**: Queues checkin post-expiration (locks token in `MailLocker` for 10y).
+- **Purpose**: Queues checkin post-expiration (locks fixed 0.5 $MAIL in `MailLocker` for 10y).
 - **Checks**: Caller=owner, `_now()` > allowanceEnd, transfer succeeds.
 - **Internal Calls**:
-  - `_processQueueRequirements`: Locks tokens via `MailLocker.depositLock`.
-  - `_calculateMinRequired`: 1 * 2^queueLen wei.
+  - `_processQueueRequirements`: Transfers fixed `checkInCost`, calls `MailLocker.depositLock` (normalized).
   - `_calculateWaitDuration`: 10min + 6h*queueLen, cap 2w.
   - `this.advance`: Processes if ready.
-- **Effects**: Pushes `PendingCheckin` with `queuedTime = _now()`, emits `QueueCheckInQueued`.
+- **Effects**: Pushes `PendingCheckin`, emits `QueueCheckInQueued`.
 
 ### advance()
 - **Purpose**: Processes one ready checkin.
@@ -201,20 +201,30 @@ MailNames is the primary name system for Chainmail (link unavailable).
 - **Effects**: Sets `owner`, emits `OwnershipTransferred`.
 
 ### acceptMarketBid(uint256 _nameHash, bool _isETH, address _token, uint256 _bidIndex)
-- **Purpose**: Allows owner to accept bid via `MailMarket`.
-- **Checks**: Caller=owner, `_now()` <= allowanceEnd, valid tokenId.
+- **Purpose**: Owner-initiated bid acceptance (pre-expiration) or anyone after full grace (post-expiration).
+- **Checks**:
+  - Pre-expiration (`_now() <= allowanceEnd`): only current owner.
+  - Post-expiration (`_now() > graceEnd`): anyone.
 - **Internal Calls**:
-  - `_settleBid`: Queues or settles via `MailMarket.settleBid`.
-- **Effects**: Immediate settlement if within allowance.
+  - `_settleBid`:
+    - Pre-grace → immediate `MailMarket.settleBid`.
+    - Post-grace → queues into `pendingSettlements` (processed later via `processSettlement`).
+- **Effects**: Immediate or delayed settlement.
 
-### processSettlement() [external]
-- **Purpose**: Processes one queued settlement after 3 weeks.
-- **Checks**: `queueTime + 3 weeks <= _now()`.
+### processSettlement(uint256 _index)
+- **Purpose**: Anyone can process a queued post-grace settlement after 3 weeks.
+- **Checks**: `_index` valid, `_now() >= queueTime + 3 weeks`.
 - **Internal Calls**:
-  - `MailMarket.settleBid`: Executes transfer.
-  - `_clearPendingSettlements`: Removes processed entries.
-- **Effects**: Emits `SettlementProcessed`.
+  - `_calculateSettlementRequirements` → fixed 0.5 $MAIL.
+  - `_validateBidderMAILBalance`: Checks winning bidder still holds ≥ 0.5 $MAIL.
+  - If insufficient → `MailMarket.cancelBid` (1% penalty), remove settlement, exit gracefully.
+  - Else → `MailMarket.settleBid` → transfer name + funds, lock 0.5 $MAIL from new owner, queue new checkin, reset grace/allowance, emit `SettlementProcessed`.
+- **Effects**: Name changes hands or settlement is dropped.
 
+### setCheckInCost(uint256 _cost) [onlyOwner]
+- Allows future adjustment of the fixed check-in cost.
+
+### Key Insights
 **Ownership**: Unified via `ownerOf`; `acceptMarketBid` ensures owner auth.
 - **Grace/Queue**: 7-day primary grace; post-grace bids queue for 3 weeks; renewals clear settlements, preserving bids for later acceptance.
 - **Time Logic**: All timestamps use `_now()` → `isWarped ? currentTime : block.timestamp`.
@@ -348,6 +358,10 @@ Handles bidding for `MailNames` (ETH/ERC20, auto-settle post-grace via queue). S
   - `_now()`: Sets `timestamp`.
 - **Effects**: Stores bid, emits `BidPlaced`.
 
+#### cancelBid(uint256 _nameHash, uint256 _bidIndex, bool _isETH, address _token) [only MailNames]
+- Penalises winning bidder who no longer holds required $MAIL.
+- Burns 1%, refunds 99%, removes bid, decrements `bidderActiveBids`.
+
 #### closeBid(uint256 _nameHash, bool _isETH, address _token, uint256 _bidIndex)
 - **Purpose**: Refunds/removes bid, decrements `bidderActiveBids`.
 - **Checks**: Valid index, caller=bidder.
@@ -386,6 +400,9 @@ Handles bidding for `MailNames` (ETH/ERC20, auto-settle post-grace via queue). S
 #### unWarp() [onlyOwner]
 - **Purpose**: Disables warp.
 - **Effects**: `isWarped = false`.
+
+#### getBidDetails(uint256 _nameHash, uint256 _bidIndex, bool _isETH, address _token) view
+- Returns bidder and amount for a specific bid slot (used by `processSettlement`).
 
 #### getNameBids(string _name, bool _isETH, address _token)
 - **Purpose**: Retrieves all bids for a name (ETH or ERC20).
@@ -432,7 +449,8 @@ Handles bidding for `MailNames` (ETH/ERC20, auto-settle post-grace via queue). S
 
 ### Key Insights
 - **Bidding**: ETH/ERC20 bids; auto-settle post-grace via `MailNames._settleBid` (queued for 3w); owner-initiated via `acceptBid` -> `MailNames.acceptMarketBid`.
-- **Griefing Deterrence**: $MAIL requirement scales with `bidderActiveBids`, increasing costs for spamming multiple bids.
+- **Griefing resistance**: Fixed low lock cost + 3-week delay + 1% penalty on insufficient balance makes spamming expensive and ineffective.
+- **Graceful degradation**: If the winning bidder disappears or sells their $MAIL, the name simply stays with the original owner.
 - **Fee Handling**: `TokenTransferData` ensures accurate token amounts.
 - **Time Logic**: Bid timestamps use `_now()`.
 - **Gas/DoS**: Fixed 100 bids; optimized `_insertAndSort` with sorted insertion; paginated views (`getNameBids`, `getBidderBids`).
@@ -442,5 +460,4 @@ Handles bidding for `MailNames` (ETH/ERC20, auto-settle post-grace via queue). S
 ## Notes
 - No `ReentrancyGuard` needed; no recursive calls.
 - All on-chain; try/catch for ERC721 hooks.
-- Automated renewal scripts can be outbid by users renewing during the script’s grace period, increasing lock-up costs and depleting script tokens before withdrawals.
 - **Time Warping**: Unified across `MailNames`, `MailLocker`, `MailMarket` for testing.

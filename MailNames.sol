@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.32 (17/11/2025)
+// File Version: 0.0.33 18/11/2025)
 // Changelog:
+// - 18/11/2025: Removed lockup amount scaling. 
 // - 17/11/2025: Ensured $MAIL balance requirement in processSettlement, added helper functions , updated MailMarket interface for bid cancellation. 
 // - Adjusted settlement logic in _settleBid and processSettlement
 // - Adjusted post-grace settlement logic in acceptMarketBid.
@@ -127,6 +128,7 @@ contract MailNames {
     address public mailToken;
     address public mailLocker;
     address public mailMarket;
+    uint256 public checkInCost = 5e17; // 0.5 MAIL (in wei, 18 decimals)
     
     uint256 public currentTime;
     bool public isWarped;
@@ -172,6 +174,10 @@ function _now() internal view returns (uint256) {
     return isWarped ? currentTime : block.timestamp;
 }
 
+function setCheckInCost(uint256 _cost) external onlyOwner {
+    checkInCost = _cost;
+}
+
     function transferOwnership(address _newOwner) external onlyOwner {
         require(_newOwner != address(0), "Invalid owner");
         address oldOwner = owner;
@@ -212,10 +218,6 @@ function _now() internal view returns (uint256) {
         require(bytes(_record.contentHash).length <= MAX_STRING_LENGTH, "Content hash too long");
     }
 
-    function _calculateMinRequired(uint256 _queueLen) private pure returns (uint256) {
-        return 1 * (2 ** _queueLen);
-    }
-
     function _calculateWaitDuration(uint256 _queueLen) private pure returns (uint256) {
         uint256 wait = 10 minutes + 6 hours * _queueLen;
         return wait > 2 weeks ? 2 weeks : wait;
@@ -252,18 +254,13 @@ function _now() internal view returns (uint256) {
     }
 
     function _processQueueRequirements() private returns (uint256 queueLen, uint256 minRequired) {
-        queueLen = pendingCheckins.length - nextProcessIndex;
-        // 1. Get the normalized amount (e.g., 1)
-        uint256 minRequiredNormalized = _calculateMinRequired(queueLen);
-        // 2. Calculate the full amount (e.g., 1e18)
-uint8 decimals = IERC20(mailToken).decimals();
-        minRequired = minRequiredNormalized * (10 ** decimals); // This is the full amount in wei
-        // 3. Transfer the full amount
-        IERC20(mailToken).transferFrom(msg.sender, address(this), minRequired);
-        // 4. Lock the normalized amount
-        uint256 normalized = minRequiredNormalized; // This is the normalized amount (e.g., 1)
-IMailLocker(mailLocker).depositLock(normalized, msg.sender, _now() + 365 days * 10);
-    }
+    queueLen = pendingCheckins.length - nextProcessIndex;
+    minRequired = checkInCost;
+    IERC20(mailToken).transferFrom(msg.sender, address(this), minRequired);
+    uint8 decimals = IERC20(mailToken).decimals();
+    uint256 normalized = minRequired / (10 ** decimals);
+    IMailLocker(mailLocker).depositLock(normalized, msg.sender, _now() + 365 days * 10);
+}
 
 // Changelog: 0.0.31 (17/10/2025) - Adjusted pre-grace and post-grace settlement logic. 
         function _settleBid(uint256 _nameHash, uint256 _bidIndex, bool _isETH, address _token) private {
@@ -290,9 +287,9 @@ IMailLocker(mailLocker).depositLock(normalized, msg.sender, _now() + 365 days * 
 
 function _calculateSettlementRequirements() private view returns (uint256 queueLen, uint256 minReq, uint256 fullMinReq) {
     queueLen = pendingCheckins.length - nextProcessIndex;
-    minReq = _calculateMinRequired(queueLen);
+    fullMinReq = checkInCost;
     uint8 dec = IERC20(mailToken).decimals();
-    fullMinReq = minReq * (10 ** dec);
+    minReq = fullMinReq / (10 ** dec);
 }
 
 function _validateBidderMAILBalance(address bidder, uint256 requiredAmount) private view returns (bool) {

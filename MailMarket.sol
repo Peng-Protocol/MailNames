@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.9 (17/11/2025)
+// File Version: 0.0.10 (18/11/2025)
 // Changelog:
+// - 18/11/2025: Aligned with new lock-up amount on MailNames. 
 // - 17/11/2025: Added getBidDetails and cancelBid (MailNames only). 
 // - 13/11/2035: Removed "tokenId != 0" in various functions , replaced with other suitable checks. 
 // - 07/11/2025: Added time-warp system (currentTime, isWarped, warp(), unWarp(), _now()) to IMailNames, MailLocker, MailMarket for VM testing consistency with TrustlessFund
@@ -25,6 +26,7 @@ interface IMailNames {
     function nameHashToTokenId(uint256 nameHash) external view returns (uint256);
     function transfer(uint256 tokenId, address to) external;
     function acceptMarketBid(uint256 _nameHash, bool _isETH, address _token, uint256 _bidIndex) external;
+    function checkInCost() external view returns (uint256);
 }
 
 contract MailMarket {
@@ -132,10 +134,6 @@ function _now() internal view returns (uint256) {
         return uint256(keccak256(abi.encodePacked(_str)));
     }
 
-    function _calculateMinRequired(uint256 _queueLen) private pure returns (uint256) {
-        return 1 * (2 ** _queueLen);
-    }
-
     function _insertAndSort(Bid[100] storage bidsArray, Bid memory newBid) private {
     uint256 insertPos = MAX_BIDS;
     for (uint256 i = 0; i < MAX_BIDS; i++) {
@@ -211,7 +209,7 @@ function _validateBidRequirements(string memory _name, uint256 _bidAmount) priva
     require(_bidAmount > 0, "Invalid bid amount");
     
     validation.queueLen = 0;
-    validation.minReq = _calculateMinRequired(validation.queueLen) * (bidderActiveBids[msg.sender] + 1);
+validation.minReq = (IMailNames(mailNames).checkInCost() / (10 ** IIERC20(mailToken).decimals())) * (bidderActiveBids[msg.sender] + 1);
     uint8 dec = IIERC20(mailToken).decimals();
     
     // Fix: Check balance against full amount with decimals, not normalized
@@ -300,10 +298,8 @@ function _validateBidRequirements(string memory _name, uint256 _bidAmount) priva
     if (bids[0].bidder == address(0)) return (address(0), 0, false);
     bidder = bids[0].bidder;
     amount = bids[0].amount;
-    uint256 minReq = _calculateMinRequired(0);
-    uint8 dec = IIERC20(mailToken).decimals();
-    uint256 normMin = minReq / (10 ** dec);
-    valid = IIERC20(mailToken).balanceOf(bidder) >= normMin;
+    uint256 minReq = IMailNames(mailNames).checkInCost();
+valid = IIERC20(mailToken).balanceOf(bidder) >= minReq;
     if (!valid) {
         payable(bidder).transfer(amount); // Refund invalid top bid
         bidderActiveBids[bidder]--; // Decrement bidder’s active bids

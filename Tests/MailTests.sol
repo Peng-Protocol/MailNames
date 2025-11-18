@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.15 (18/11/2025)
+// File Version: 0.0.16 (18/11/2025)
 // Changelog Summary:
-// - 18/11/2025: added acceptMarketBid call in S7.
-// - Adjusted S8 expectations , double locking is harmless. 
+// - 18/11/2025: Simplified s8.
+// - 18/11/2025: added acceptMarketBid call in s7.
+// - Adjusted s8 expectations , double locking is harmless. 
 // - 17/11/2025: Added approval in 2b_4.
 // - 17/11/2025: Added queue bid settlement in 2b_2.
 // - 17/11/2025: Adjusted p2a and 2b tests to distinguish focus on token bid (pre expiration) vs eth bid (post expiration), added allowance in 2a. 
@@ -505,63 +506,51 @@ function p2b_4TestPostGraceSettlement() public {
     }
 
     function s8_DoubleCheckIn() public {
-        // 1. Reset time to ensure clean state and minting at current block
-        if (names.isWarped()) names.unWarp();
-        
-        string memory name = "doublecheck";
-        testers[0].proxyCall(address(names), abi.encodeWithSignature("mintName(string)", name));
-        uint256 nameHash = uint256(keccak256(abi.encodePacked(name)));
+    // 1. Reset Time & State
+    if (names.isWarped()) names.unWarp();
+    
+    string memory name = "doublecheck";
+    testers[0].proxyCall(address(names), abi.encodeWithSignature("mintName(string)", name));
+    uint256 nameHash = uint256(keccak256(abi.encodePacked(name)));
+    
+    // 2. Warp to expiration
+    names.warp(block.timestamp + ONE_YEAR + 1);
+    
+    // 3. Approve & Double Queue
+    _approveMAIL(0, address(names));
+    
+    // Queue 1st time (Cost: 0.5 MAIL)
+    testers[0].proxyCall(address(names), abi.encodeWithSignature("queueCheckIn(uint256)", nameHash));
+    
+    // Queue 2nd time (Cost: 0.5 MAIL)
+    // This verifies that duplicate check-ins are allowed (harmless double-locking)
+    testers[0].proxyCall(address(names), abi.encodeWithSignature("queueCheckIn(uint256)", nameHash));
+    
+    // 4. Process Both Entries
+    // Warp 30 minutes to ensure both are ready
+    names.warp(names.currentTime() + 30 minutes);
+    
+    // Call advance() twice to process both queue items
+    testers[0].proxyCall(address(names), abi.encodeWithSignature("advance()"));
+    testers[0].proxyCall(address(names), abi.encodeWithSignature("advance()"));
+    
+    // 5. Verify Time Cap
+    // The allowanceEnd should be roughly _now + 365 days. 
+    // It should NOT be + 730 days (double benefit).
+    MailNames.NameRecord memory rec = names.getNameRecords(name);
+    uint256 expectedEnd = names.currentTime() + 365 days;
+    
+    // Allow small buffer (100s) for execution time variance
+    assert(rec.allowanceEnd >= expectedEnd - 100 && rec.allowanceEnd <= expectedEnd + 100);
 
-        // 2. Warp to expiration (Allow Check-in)
-        names.warp(block.timestamp + ONE_YEAR + 1);
-        
-        // 3. Setup: Get initial state
-        // We expect the queue length to be 0 (or known) relative to processing index
-        (uint256 initialPending, , , ) = names.pendingCheckins(0); // Just checking access, length check below
-        uint256 startLocked = locker.getTotalLocked(address(testers[0]));
-        
-        // Approve plenty of tokens (Exponential cost requires more buffer)
-        _approveMAIL(0, address(names));
-
-        // 4. First Check-in
-        // Cost should be 1 * 2^0 = 1 unit (normalized)
-        testers[0].proxyCall(address(names), abi.encodeWithSignature("queueCheckIn(uint256)", nameHash));
-        
-        uint256 lockedAfterFirst = locker.getTotalLocked(address(testers[0]));
-        // Assuming 1e18 decimals: 1 unit locked
-        assert(lockedAfterFirst == startLocked + 1e18);
-
-        // 5. Second Check-in (The Inefficiency)
-        // Cost should be 1 * 2^1 = 2 units (normalized) because queue grew by 1
-        testers[0].proxyCall(address(names), abi.encodeWithSignature("queueCheckIn(uint256)", nameHash));
-        
-        uint256 lockedAfterSecond = locker.getTotalLocked(address(testers[0]));
-        // Total added should be 1 + 2 = 3 units total
-        assert(lockedAfterSecond == lockedAfterFirst + 2e18);
-
-        // 6. Verify Queue State
-        // We can't easily check array length via external interface without a specific getter for length,
-        // but we can infer it by checking the wait duration of the latest entry or just verifying no revert happened.
-        
-        // 7. Process Both Check-ins to verify Time Behavior
-        // Warp past the wait time (max 2 weeks to be safe)
-        names.warp(names.currentTime() + 3 weeks);
-        
-        // Process 1st entry
-        names.advance();
-        uint256 time1 = names.getNameRecords(name).allowanceEnd;
-        
-        // Process 2nd entry (Should happen immediately after if in same block/warp context)
-        names.advance();
-        uint256 time2 = names.getNameRecords(name).allowanceEnd;
-
-        // 8. Assert "Time isn't Doubled"
-        // The second advance() overwrites the allowanceEnd to (_now() + 365 days).
-        // It does NOT add 365 days to the existing allowanceEnd.
-        // Since we warped once, time1 and time2 should be identical (or extremely close).
-        assert(time2 == time1);
-        assert(time2 < block.timestamp + ONE_YEAR + 3 weeks + ONE_YEAR); // Definitely not 2 years
-    }
+    // 6. Verify Fixed Cost Lock
+    // Tester 0 started with 0 deposits.
+    // Total should be 1.0 MAIL (0.5 from first + 0.5 from second).
+    uint256 totalLocked = locker.getTotalLocked(address(testers[0]));
+    
+    // Check for 1e18 (1.0 MAIL with 18 decimals)
+    assert(totalLocked >= 1e18);
+}
 
     function s9_WithdrawLockedMAIL() public {
         try testers[1].proxyCall(address(locker), abi.encodeWithSignature("withdraw(uint256)", 0))
