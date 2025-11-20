@@ -1,18 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.10 (18/11/2025)
+// File Version: 0.0.11 (20/11/2025)
 // Changelog:
-// - 18/11/2025: Aligned with new lock-up amount on MailNames. 
-// - 17/11/2025: Added getBidDetails and cancelBid (MailNames only). 
-// - 13/11/2035: Removed "tokenId != 0" in various functions , replaced with other suitable checks. 
-// - 07/11/2025: Added time-warp system (currentTime, isWarped, warp(), unWarp(), _now()) to IMailNames, MailLocker, MailMarket for VM testing consistency with TrustlessFund
-// - 0.0.6 (07/10): Updated checkTopBidder to close invalid top bid, refund, and clear data
-// - 0.0.5 (07/10): Added getBidderBids to view bidder’s bid indices per token
-// - 0.0.4 (07/10): Added bidderActiveBids; scaled minReq by user bids; optimized _insertAndSort
-// - 0.0.3 (07/10): Updated _validateBidRequirements to scale minReq by active bid count
-// - 0.0.2 (05/10): Updated acceptBid to call IMailNames.acceptMarketBid; added OwnershipTransferred event
-// - 0.0.1 (05/10): Initial implementation with bidding from IMailNames
+// - 20/11/2025: Fixed lockup normalization and minimum $MAIL requirement check. 
 
 interface IIERC20 {
     function decimals() external view returns (uint8);
@@ -201,6 +192,7 @@ function cancelBid(uint256 _nameHash, uint256 _bidIndex, bool _isETH, address _t
     emit BidClosed(_nameHash, bid.bidder, bid.amount, _isETH);
 }
 
+// Replace _validateBidRequirements
 function _validateBidRequirements(string memory _name, uint256 _bidAmount) private view returns (BidValidation memory validation) {
     validation.nameHash = _stringToHash(_name);
     validation.tokenId = IMailNames(mailNames).nameHashToTokenId(validation.nameHash);
@@ -209,15 +201,16 @@ function _validateBidRequirements(string memory _name, uint256 _bidAmount) priva
     require(_bidAmount > 0, "Invalid bid amount");
     
     validation.queueLen = 0;
-validation.minReq = (IMailNames(mailNames).checkInCost() / (10 ** IIERC20(mailToken).decimals())) * (bidderActiveBids[msg.sender] + 1);
-    uint8 dec = IIERC20(mailToken).decimals();
     
-    // Fix: Check balance against full amount with decimals, not normalized
-    uint256 fullMinReq = validation.minReq * (10 ** dec);
-    require(IIERC20(mailToken).balanceOf(msg.sender) >= fullMinReq, "Insufficient MAIL");
-    require(_bidAmount >= validation.minReq, "Bid below min lock");
+    // FIX (0.0.11): Use checkInCost directly without normalization logic
+    uint256 cost = IMailNames(mailNames).checkInCost();
+    validation.minReq = cost * (bidderActiveBids[msg.sender] + 1);
+
+    // FIX: Strictly check that the bidder holds the required MAIL collateral in their wallet.
+    // We do NOT compare this against _bidAmount (which is ETH or ERC20).
+    require(IIERC20(mailToken).balanceOf(msg.sender) >= validation.minReq, "Insufficient MAIL");
     
-    validation.normMin = validation.minReq; // Store normalized for later use
+    validation.normMin = validation.minReq;
 }
 
     function _handleTokenTransfer(address _token, uint256 _amount) private returns (uint256 receivedAmount) {

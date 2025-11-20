@@ -1,40 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.33 18/11/2025)
+// File Version: 0.0.34 (20/11/2025)
 // Changelog:
-// - 18/11/2025: Removed lockup amount scaling. 
-// - 17/11/2025: Ensured $MAIL balance requirement in processSettlement, added helper functions , updated MailMarket interface for bid cancellation. 
-// - Adjusted settlement logic in _settleBid and processSettlement
-// - Adjusted post-grace settlement logic in acceptMarketBid.
-// - Added "transfer" function to allow MailMarket to transfer names during bid settlement.
-// - ++ v0.0.22 in acceptMarketBid
-// - ++ v0.0.22 in _processNextCheckin
-// - 09/11/2025: Added max approval when setting locker.
-// - 09/11/2025: Improved check-in billing accuracy. 
-// - 09/11/2025: Added non-zero token hash check in key functions. 
-// - 08/11/2025: Removed unnecessary token count check in various functions. 
-// - 07/11/2025: Added time-warp system (currentTime, isWarped, warp(), unWarp(), _now()) to MailNames, IMailLocker, IMailMarket for VM testing consistency with TrustlessFund
-// - 0.0.20 (06/10): Updated getNameRecords to return single record; added getSettlementById
-// - 0.0.19 (06/10): Updated getNameRecords, getPendingSettlements to use name string
-// - 0.0.18 (06/10): Added getPendingSettlements for paginated view
-// - 0.0.17 (06/10): Removed queueSettlement; updated _settleBid to handle all post-grace queuing
-// - 0.0.16 (06/10): Changed GRACE_PERIOD to 7 days; updated _processNextCheckin to clear pendingSettlements on renewal
-// - 0.0.15 (06/10): Added getNameByTokenId to retrieve name string by token ID
-// - 0.0.14 (06/10): Added PendingSettlement struct, processSettlement; updated _settleBid to queue post-grace settlements
-// - 0.0.13 (05/10): Added acceptMarketBid to call IMailMarket.settleBid for owner-initiated bid acceptance
-// - 0.0.12 (05/10): Removed bidding, added mailMarket/setter, updated _settleBid, removed _nameHash from _processQueueRequirements
-// - 0.0.11 (05/10): Added SettlementData, _removeBidFromArray, _transferBidFunds, _handlePostGraceSettlement, refactored _settleBid
-// - 0.0.10 (05/10): Added TokenTransferData, BidValidation, helpers, refactored queueCheckIn
-// - 0.0.9 (05/10): Restructured bidding, added graceEnd
-// - 0.0.8 (05/10): Renewable names post-allowanceEnd
-// - 0.0.7 (05/10): Added transferOwnership
-// - 0.0.6 (05/10): Added checkin queue, IMailLocker integration
-// - 0.0.5 (05/10): Implemented safeTransferFrom
-// - 0.0.4 (04/10): Fixed ownership, added enumerable views
-// - 0.0.3 (04/10): Added ERC721 compatibility
-// - 0.0.2 (03/10): Added bidder views, fixed closeBid
-// - 0.0.1 (03/10): Initial implementation
+// - 20/11/2025: Fixed lock amount normalization. 
 
 interface IERC20 {
     function decimals() external view returns (uint8);
@@ -253,13 +222,14 @@ function setCheckInCost(uint256 _cost) external onlyOwner {
         }
     }
 
-    function _processQueueRequirements() private returns (uint256 queueLen, uint256 minRequired) {
+function _processQueueRequirements() private returns (uint256 queueLen, uint256 minRequired) {
     queueLen = pendingCheckins.length - nextProcessIndex;
-    minRequired = checkInCost;
+    minRequired = checkInCost; // FIX: Use raw cost (e.g. 5e17)
+    
     IERC20(mailToken).transferFrom(msg.sender, address(this), minRequired);
-    uint8 decimals = IERC20(mailToken).decimals();
-    uint256 normalized = minRequired / (10 ** decimals);
-    IMailLocker(mailLocker).depositLock(normalized, msg.sender, _now() + 365 days * 10);
+    
+    // FIX (0.0.34): Do not divide by decimals. Pass raw amount to Locker.
+    IMailLocker(mailLocker).depositLock(minRequired, msg.sender, _now() + 365 days * 10);
 }
 
 // Changelog: 0.0.31 (17/10/2025) - Adjusted pre-grace and post-grace settlement logic. 
@@ -288,8 +258,7 @@ function setCheckInCost(uint256 _cost) external onlyOwner {
 function _calculateSettlementRequirements() private view returns (uint256 queueLen, uint256 minReq, uint256 fullMinReq) {
     queueLen = pendingCheckins.length - nextProcessIndex;
     fullMinReq = checkInCost;
-    uint8 dec = IERC20(mailToken).decimals();
-    minReq = fullMinReq / (10 ** dec);
+    minReq = fullMinReq; // FIX (0.0.34): No normalization/division. minReq equals fullMinReq.
 }
 
 function _validateBidderMAILBalance(address bidder, uint256 requiredAmount) private view returns (bool) {

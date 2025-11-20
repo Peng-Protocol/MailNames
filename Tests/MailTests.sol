@@ -1,27 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.16 (18/11/2025)
+// File Version: 0.0.17 (20/11/2025)
 // Changelog Summary:
-// - 18/11/2025: Simplified s8.
-// - 18/11/2025: added acceptMarketBid call in s7.
-// - Adjusted s8 expectations , double locking is harmless. 
-// - 17/11/2025: Added approval in 2b_4.
-// - 17/11/2025: Added queue bid settlement in 2b_2.
-// - 17/11/2025: Adjusted p2a and 2b tests to distinguish focus on token bid (pre expiration) vs eth bid (post expiration), added allowance in 2a. 
-// - 16/11/2025: Adjusted s5 to transfer tester 3's $MAIL to ensure invalid bid fails. 
-// - 16/11/2025: Split path 2 into p2a (pre-expiration) and p2b (post-expiration) to avoid time warp conflicts
-// - 16/11/2025: Fixed 2_4 and s6 call target, mailNames.acceptMarketBid not mailMarket.acceptBid. 
-// - 16/11/2025: Fixed 2_3 normalization. 
-// - 16/11/2025: Increased ETH distribution in initiateTesters, added receive().
-// - 13/11/2025: Increased ETH amount in initiateTesters  to avoid out-of-gas issues in proxyCall{value: 1 ether}(...))
-// - 13/11/2025: Added pre-test unWarp() calls to p2_1TestETHBidSetup and s1_MintDuplicateName to reset any lingering time-warp state from previous test paths.
-// - 08/12/2025: Adjusted path_1 time warp to check warped time.
-// - 08/12/2025: Removed automatic ownership transfer attempt. 
-// - 08/11/2025: Removed internal deployment of MailNames, MailLocker, MailMarket. Added setMailContracts() to accept pre-deployed instances.
-// - 08/11/2025: Ownership transfer now attempted during setMailContracts() via inline interfaces. Fallback comment added if not possible.
-// - 08/11/2025: _configureContracts() now only configures mailToken and mockERC20; mail system contracts are assumed configured externally.
-// - 08/11/2025: Added require checks for non-zero addresses in setMailContracts().
+// - 20/11/2025: Adjusted S6. 
 
 import "./MockMAILToken.sol";
 import "./MockMailTester.sol";
@@ -435,30 +417,36 @@ function p2b_4TestPostGraceSettlement() public {
     testers[0].proxyCall(address(names), abi.encodeWithSignature("mintName(string)", "nomail"));
     names.warp(block.timestamp + ONE_YEAR + GRACE + 1);
     
-    // First, transfer away tester[3]'s MAIL tokens so they have insufficient balance
+    // Transfer away tester 3's MAIL tokens.
+    // Market requires 0.5 MAIL. Tester has 0.
     testers[3].proxyCall(
         address(mailToken),
         abi.encodeWithSignature("transfer(address,uint256)", address(testers[0]), 100 * 1e18)
     );
-    
-    // Now the bid should fail due to insufficient MAIL balance
+
     try testers[3].proxyCall{value: 1 ether}(
         address(market), abi.encodeWithSignature("placeETHBid(string)", "nomail")
-    ) { revert("Did not revert"); } catch {}
+    ) { revert("Did not revert");
+    } catch {}
 }
 
     function s6_AcceptBidNotOwner() public {
         testers[0].proxyCall(address(names), abi.encodeWithSignature("mintName(string)", "notowner"));
-        names.warp(block.timestamp + ONE_YEAR + GRACE + 1);
+        
+        // FIX (0.0.17): Do NOT warp past Grace. 
+        // Post-grace, ANYONE can settle a bid. We must test Pre-Expiration to verify Owner protection.
+        // Current time is < allowanceEnd.
+
         _approveMAIL(2, address(market));
         testers[2].proxyCall{value: 1 ether}(address(market), abi.encodeWithSignature("placeETHBid(string)", "notowner"));
         uint256 hash = uint256(keccak256(abi.encodePacked("notowner")));
-        
+
+        // Tester 1 (not owner) tries to accept bid while name is still protected
         try testers[1].proxyCall(
             address(names),
             abi.encodeWithSignature("acceptMarketBid(uint256,bool,address,uint256)", hash, true, address(0), 0)
         ) { 
-            revert("Did not revert"); 
+            revert("Did not revert");
         } catch {}
     }
 
@@ -512,10 +500,10 @@ function p2b_4TestPostGraceSettlement() public {
     string memory name = "doublecheck";
     testers[0].proxyCall(address(names), abi.encodeWithSignature("mintName(string)", name));
     uint256 nameHash = uint256(keccak256(abi.encodePacked(name)));
-    
+
     // 2. Warp to expiration
     names.warp(block.timestamp + ONE_YEAR + 1);
-    
+
     // 3. Approve & Double Queue
     _approveMAIL(0, address(names));
     
@@ -523,32 +511,25 @@ function p2b_4TestPostGraceSettlement() public {
     testers[0].proxyCall(address(names), abi.encodeWithSignature("queueCheckIn(uint256)", nameHash));
     
     // Queue 2nd time (Cost: 0.5 MAIL)
-    // This verifies that duplicate check-ins are allowed (harmless double-locking)
     testers[0].proxyCall(address(names), abi.encodeWithSignature("queueCheckIn(uint256)", nameHash));
-    
+
     // 4. Process Both Entries
-    // Warp 30 minutes to ensure both are ready
-    names.warp(names.currentTime() + 30 minutes);
-    
-    // Call advance() twice to process both queue items
+    // Warp sufficient time (e.g., 7 hours) to pass the dynamic queue wait
+    names.warp(names.currentTime() + 7 hours);
+
     testers[0].proxyCall(address(names), abi.encodeWithSignature("advance()"));
     testers[0].proxyCall(address(names), abi.encodeWithSignature("advance()"));
-    
-    // 5. Verify Time Cap
-    // The allowanceEnd should be roughly _now + 365 days. 
-    // It should NOT be + 730 days (double benefit).
+
+    // 5. Verify Time Cap (approx 1 year from now)
     MailNames.NameRecord memory rec = names.getNameRecords(name);
     uint256 expectedEnd = names.currentTime() + 365 days;
-    
-    // Allow small buffer (100s) for execution time variance
     assert(rec.allowanceEnd >= expectedEnd - 100 && rec.allowanceEnd <= expectedEnd + 100);
 
     // 6. Verify Fixed Cost Lock
-    // Tester 0 started with 0 deposits.
-    // Total should be 1.0 MAIL (0.5 from first + 0.5 from second).
+    // Total should be 1.0 MAIL (0.5 + 0.5).
     uint256 totalLocked = locker.getTotalLocked(address(testers[0]));
     
-    // Check for 1e18 (1.0 MAIL with 18 decimals)
+    // Now that Locker stores raw amounts, this should be about 1e18, notwithstanding prior tests.
     assert(totalLocked >= 1e18);
 }
 

@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.02 (07/11/2025)
+// File Version: 0.0.03 (20/11/2025)
 // Changelog:
-// - 07/11/2025: Added time-warp system (currentTime, isWarped, warp(), unWarp(), _now()) to MailNames, MailLocker, MailMarket for VM testing consistency with TrustlessFund
-// - 0.0.1 (05/10): Initial with owner/setters, Deposit struct/array, index withdraw/swap-pop, paginated views, events
+// - 20/11/2025: Fixed Normalization
 
 interface IIIERC20 {
     function decimals() external view returns (uint8);
@@ -71,31 +70,33 @@ function _now() internal view returns (uint256) {
         mailNames = _mailNames;
     }
 
-    // Deposit: Pull full from MailNames, push normalized Deposit
-    function depositLock(uint256 _normalizedAmount, address _user, uint256 _unlockTime) external {
-        require(msg.sender == mailNames, "Only MailNames");
-        uint8 decimals = mailToken.decimals();
-        uint256 fullAmount = _normalizedAmount * (10 ** decimals);
-        require(mailToken.transferFrom(mailNames, address(this), fullAmount), "Transfer failed");
-        uint256 index = userDeposits[_user].length;
-        userDeposits[_user].push(Deposit(_normalizedAmount, _unlockTime));
-        emit DepositLocked(_user, index, _normalizedAmount, _unlockTime);
-    }
 
-    // Withdraw specific deposit by index (swap-pop for gas)
-    function withdraw(uint256 _index) external {
-        Deposit[] storage deposits = userDeposits[msg.sender];
-        require(_index < deposits.length, "Invalid index");
-        Deposit storage dep = deposits[_index];
-        require(_now() >= dep.unlockTime, "Not unlocked");
-        uint256 amt = dep.amount;
-        // Swap and pop
-        deposits[_index] = deposits[deposits.length - 1];
-        deposits.pop();
-        uint8 decimals = mailToken.decimals();
-        require(mailToken.transfer(msg.sender, amt * (10 ** decimals)), "Withdraw failed");
-        emit DepositWithdrawn(msg.sender, _index, amt);
-    }
+function depositLock(uint256 _amount, address _user, uint256 _unlockTime) external {
+    require(msg.sender == mailNames, "Only MailNames");
+    // FIX: Removed multiplication by decimals. Receive raw amount.
+    require(mailToken.transferFrom(mailNames, address(this), _amount), "Transfer failed");
+    
+    uint256 index = userDeposits[_user].length;
+    userDeposits[_user].push(Deposit(_amount, _unlockTime));
+    emit DepositLocked(_user, index, _amount, _unlockTime);
+}
+
+
+function withdraw(uint256 _index) external {
+    Deposit[] storage deposits = userDeposits[msg.sender];
+    require(_index < deposits.length, "Invalid index");
+    Deposit storage dep = deposits[_index];
+    require(_now() >= dep.unlockTime, "Not unlocked");
+    uint256 amt = dep.amount;
+
+    // Swap and pop
+    deposits[_index] = deposits[deposits.length - 1];
+    deposits.pop();
+
+    // FIX: Removed multiplication by decimals. Transfer raw amount.
+    require(mailToken.transfer(msg.sender, amt), "Withdraw failed");
+    emit DepositWithdrawn(msg.sender, _index, amt);
+}
 
     // View: Paginated user deposits
     function getUserDeposits(address _user, uint256 _step, uint256 _maxIterations) external view returns (Deposit[] memory deposits) {
