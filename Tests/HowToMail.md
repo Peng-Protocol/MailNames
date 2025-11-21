@@ -21,7 +21,7 @@
    - This will:
      - Assign the instances to `MailTests`
      - Configure token and cross-references
-   - Ownership transfer is **not** attempted; perform manually before calling.
+   - Ownership transfer is **not** attempted; manually transfer ownership of subject contracts (`MailNames`, `MailLocker`, `MailMarket`) to `MailTests` **before** calling this function.
 9. Call `initiateTesters()` with **20 ETH** (value field).
 10. **Path 1 – Basic Lifecycle**:
     - `p1_1TestMint()`
@@ -41,7 +41,7 @@
     - `p2b_2TestPostExpirationETHBid()`
     - `p2b_3TestQueueSettlement()`
     - `p2b_4TestPostGraceSettlement()`
-13. **Sad Path Tests** (Independent):
+13. **Sad Path Tests** (Requires redeployment of subject contracts and `MailTests`):
     - `s1_MintDuplicateName()`
     - `s2_MintInvalidName()`
     - `s3_NonOwnerTransfer()`
@@ -176,4 +176,3 @@ Attempts to call various functions incorrectly, expecting them to fail.
 - **Ownership Transfer**:
   - `setMailContracts()` **does not** transfer ownership of `MailNames`, `MailLocker`, `MailMarket` to `MailTests`.
   - Perform manually before calling.
-  - `OwnershipTransferFailed` is **not** emitted; failures are silent/non-critical.
